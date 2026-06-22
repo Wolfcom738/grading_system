@@ -1,0 +1,1302 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>感知数据轨迹可视化系统</title>
+    
+    <!-- Vue 3 -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    
+    <!-- Leaflet CSS & JS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <!-- Leaflet 卫星地图插件 (Esri World Imagery) -->
+    <script src="https://unpkg.com/esri-leaflet@3.0.10/dist/esri-leaflet.js"></script>
+    
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; background: #0a0e1a; color: #e0e6ed; overflow: hidden; }
+        #app { display: flex; height: 100vh; }
+        
+        .sidebar { width: 320px; background: rgba(15, 23, 42, 0.95); border-right: 1px solid rgba(56, 189, 248, 0.2); display: flex; flex-direction: column; backdrop-filter: blur(10px); }
+        .sidebar-header { padding: 20px; border-bottom: 1px solid rgba(56, 189, 248, 0.2); background: linear-gradient(135deg, rgba(56, 189, 248, 0.1), rgba(139, 92, 246, 0.1)); }
+        .sidebar-header h2 { font-size: 18px; color: #38bdf8; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+        .sidebar-header h2::before { content: "📡"; }
+        .stats-bar { display: flex; gap: 15px; font-size: 12px; color: #94a3b8; }
+        .stats-bar span { background: rgba(56, 189, 248, 0.1); padding: 4px 10px; border-radius: 6px; border: 1px solid rgba(56, 189, 248, 0.2); }
+        
+        .filter-section { padding: 15px 20px; border-bottom: 1px solid rgba(56, 189, 248, 0.1); }
+        .filter-input { width: 100%; padding: 10px 14px; background: rgba(30, 41, 59, 0.8); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 8px; color: #e0e6ed; font-size: 13px; outline: none; transition: all 0.3s; }
+        .filter-input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.15); }
+        .filter-input::placeholder { color: #64748b; }
+        
+        .select-all-bar { padding: 12px 20px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid rgba(56, 189, 248, 0.1); background: rgba(30, 41, 59, 0.5); }
+        .select-all-bar label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; color: #94a3b8; transition: color 0.3s; }
+        .select-all-bar label:hover { color: #38bdf8; }
+        .select-all-bar input[type="checkbox"] { width: 16px; height: 16px; accent-color: #38bdf8; cursor: pointer; }
+        .select-actions { margin-left: auto; display: flex; gap: 6px; }
+        .btn-small { padding: 4px 10px; font-size: 11px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; border-radius: 4px; cursor: pointer; transition: all 0.3s; }
+        .btn-small:hover { background: rgba(56, 189, 248, 0.2); }
+        
+        .track-list { flex: 1; overflow-y: auto; padding: 10px; }
+        .track-list::-webkit-scrollbar { width: 6px; }
+        .track-list::-webkit-scrollbar-track { background: transparent; }
+        .track-list::-webkit-scrollbar-thumb { background: rgba(56, 189, 248, 0.3); border-radius: 3px; }
+        
+        .track-item { display: flex; align-items: flex-start; gap: 10px; padding: 12px; margin-bottom: 8px; background: rgba(30, 41, 59, 0.6); border: 1px solid rgba(56, 189, 248, 0.1); border-radius: 10px; cursor: pointer; transition: all 0.3s; position: relative; overflow: hidden; }
+        .track-item::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: transparent; transition: background 0.3s; }
+        .track-item:hover { background: rgba(30, 41, 59, 0.9); border-color: rgba(56, 189, 248, 0.3); transform: translateX(2px); }
+        .track-item.active { background: rgba(56, 189, 248, 0.1); border-color: rgba(56, 189, 248, 0.4); }
+        .track-item.active::before { background: #38bdf8; }
+        .track-checkbox { margin-top: 2px; accent-color: #38bdf8; }
+        .track-info { flex: 1; min-width: 0; }
+        .track-id { font-size: 12px; font-weight: 600; color: #38bdf8; margin-bottom: 4px; word-break: break-all; }
+        .track-meta { font-size: 11px; color: #64748b; line-height: 1.6; }
+        .track-meta span { display: inline-block; margin-right: 8px; }
+        .track-meta .label { color: #475569; }
+        .track-meta .value { color: #94a3b8; }
+        .track-color-indicator { width: 12px; height: 12px; border-radius: 50%; margin-top: 4px; flex-shrink: 0; box-shadow: 0 0 6px currentColor; }
+        
+        .empty-state { text-align: center; padding: 40px 20px; color: #475569; }
+        .empty-state-icon { font-size: 48px; margin-bottom: 12px; opacity: 0.5; }
+        
+        .map-container { flex: 1; position: relative; }
+        #map { width: 100%; height: 100%; }
+        
+        /* 右边栏样式 */
+        .sidebar-right { width: 340px; background: rgba(15, 23, 42, 0.95); border-left: 1px solid rgba(56, 189, 248, 0.2); display: flex; flex-direction: column; backdrop-filter: blur(10px); }
+        
+        .map-overlay { position: absolute; top: 20px; right: 20px; background: rgba(15, 23, 42, 0.9); padding: 16px 20px; border-radius: 12px; border: 1px solid rgba(56, 189, 248, 0.2); backdrop-filter: blur(10px); z-index: 1000; min-width: 220px; }
+        .map-overlay h3 { font-size: 14px; color: #38bdf8; margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
+        .map-overlay-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 12px; border-bottom: 1px solid rgba(56, 189, 248, 0.1); }
+        .map-overlay-row:last-child { border-bottom: none; }
+        .map-overlay-label { color: #64748b; }
+        .map-overlay-value { color: #e0e6ed; font-weight: 500; }
+        
+        .legend { position: absolute; bottom: 30px; right: 20px; background: rgba(15, 23, 42, 0.9); padding: 14px 18px; border-radius: 10px; border: 1px solid rgba(56, 189, 248, 0.2); backdrop-filter: blur(10px); z-index: 1000; }
+        .legend-title { font-size: 12px; color: #38bdf8; margin-bottom: 8px; font-weight: 600; }
+        .legend-item { display: flex; align-items: center; gap: 8px; font-size: 11px; color: #94a3b8; margin-bottom: 6px; }
+        .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+        .legend-line { width: 20px; height: 2px; }
+        
+        .upload-area { padding: 15px 20px; border-bottom: 1px solid rgba(56, 189, 248, 0.1); }
+        .upload-btn { width: 100%; padding: 10px; background: linear-gradient(135deg, rgba(56, 189, 248, 0.2), rgba(139, 92, 246, 0.2)); border: 1px dashed rgba(56, 189, 248, 0.4); border-radius: 8px; color: #38bdf8; font-size: 13px; cursor: pointer; text-align: center; transition: all 0.3s; }
+        .upload-btn:hover { background: linear-gradient(135deg, rgba(56, 189, 248, 0.3), rgba(139, 92, 246, 0.3)); border-style: solid; }
+        .upload-btn input { display: none; }
+        
+        .sensor-popup { background: rgba(15, 23, 42, 0.95); padding: 12px; border-radius: 8px; border: 1px solid rgba(56, 189, 248, 0.3); min-width: 200px; }
+        .sensor-popup h4 { color: #38bdf8; font-size: 13px; margin-bottom: 8px; border-bottom: 1px solid rgba(56, 189, 248, 0.2); padding-bottom: 6px; }
+        .sensor-popup p { font-size: 11px; color: #94a3b8; margin: 4px 0; }
+        .sensor-popup .highlight { color: #e0e6ed; font-weight: 500; }
+        
+        .leaflet-popup-content-wrapper { background: rgba(15, 23, 42, 0.95); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 8px; color: #e0e6ed; }
+        .leaflet-popup-tip { background: rgba(15, 23, 42, 0.95); }
+        .leaflet-container { background: #0a0e1a; }
+        
+        /* 隐藏地图提供方的标记 */
+        .leaflet-control-attribution { display: none !important; }
+        .leaflet-control-zoom { display: none !important; }
+        
+        /* Loading动画样式 */
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 9999;
+            backdrop-filter: blur(5px);
+        }
+        
+        .loading-spinner {
+            width: 60px;
+            height: 60px;
+            border: 4px solid rgba(56, 189, 248, 0.2);
+            border-top-color: #38bdf8;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .loading-text {
+            margin-top: 20px;
+            color: #38bdf8;
+            font-size: 16px;
+            font-weight: 500;
+        }
+        
+        .loading-subtext {
+            margin-top: 8px;
+            color: #94a3b8;
+            font-size: 12px;
+        }
+        
+        /* 评分面板样式 */
+        .scoring-panel {
+            padding: 15px 20px;
+            border-top: 1px solid rgba(56, 189, 248, 0.2);
+            background: rgba(15, 23, 42, 0.9);
+        }
+        
+        .scoring-panel h3 {
+            font-size: 14px;
+            color: #38bdf8;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .scoring-panel h3::before {
+            content: "📊";
+        }
+        
+        .time-align-section {
+            margin-bottom: 15px;
+            padding: 10px;
+            background: rgba(30, 41, 59, 0.6);
+            border-radius: 8px;
+            border: 1px solid rgba(56, 189, 248, 0.1);
+        }
+        
+        .time-align-section label {
+            display: block;
+            font-size: 12px;
+            color: #94a3b8;
+            margin-bottom: 6px;
+        }
+        
+        .time-align-section input {
+            width: 100%;
+            padding: 6px 10px;
+            background: rgba(15, 23, 42, 0.8);
+            border: 1px solid rgba(56, 189, 248, 0.3);
+            border-radius: 4px;
+            color: #e0e6ed;
+            font-size: 12px;
+        }
+        
+        .btn-score {
+            width: 100%;
+            padding: 10px;
+            background: linear-gradient(135deg, #38bdf8, #8b5cf6);
+            border: none;
+            border-radius: 8px;
+            color: white;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-bottom: 15px;
+        }
+        
+        .btn-score:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(56, 189, 248, 0.4);
+        }
+        
+        .btn-score:disabled {
+            background: #475569;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        
+        .score-result {
+            padding: 12px;
+            background: rgba(30, 41, 59, 0.6);
+            border-radius: 8px;
+            border: 1px solid rgba(56, 189, 248, 0.1);
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        .score-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+        
+        .score-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #22c55e;
+        }
+        
+        .score-label {
+            font-size: 12px;
+            color: #94a3b8;
+        }
+        
+        .metric-item {
+            margin-bottom: 10px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid rgba(56, 189, 248, 0.1);
+        }
+        
+        .metric-item:last-child {
+            border-bottom: none;
+            margin-bottom: 0;
+            padding-bottom: 0;
+        }
+        
+        .metric-name {
+            font-size: 12px;
+            color: #e0e6ed;
+            margin-bottom: 4px;
+        }
+        
+        .metric-bar-container {
+            height: 6px;
+            background: rgba(56, 189, 248, 0.1);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        
+        .metric-bar {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 0.5s ease;
+        }
+        
+        .metric-bar.excellent {
+            background: #22c55e;
+        }
+        
+        .metric-bar.good {
+            background: #f59e0b;
+        }
+        
+        .metric-bar.poor {
+            background: #ef4444;
+        }
+        
+        .metric-score {
+            font-size: 11px;
+            color: #94a3b8;
+            margin-top: 2px;
+        }
+        
+        .warnings-section {
+            margin-top: 12px;
+            padding: 10px;
+            background: rgba(239, 68, 68, 0.1);
+            border-radius: 6px;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+        
+        .warnings-section h4 {
+            font-size: 12px;
+            color: #ef4444;
+            margin-bottom: 6px;
+        }
+        
+        .warning-item {
+            font-size: 11px;
+            color: #fca5a5;
+            margin-bottom: 4px;
+            display: flex;
+            align-items: flex-start;
+            gap: 4px;
+        }
+        
+        .warning-item::before {
+            content: "⚠️";
+            font-size: 10px;
+            flex-shrink: 0;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <!-- Loading 动画 -->
+        <div v-if="isLoading" class="loading-overlay">
+            <div class="loading-spinner"></div>
+            <div class="loading-text">{{ loadingText }}</div>
+            <div class="loading-subtext">{{ loadingSubtext }}</div>
+        </div>
+        
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <h2>感知数据轨迹可视化</h2>
+                <div class="stats-bar">
+                    <span>📊 轨迹: {{ tracks.length }}</span>
+                    <span>✅ 选中: {{ selectedTracks.length }}</span>
+                    <span>📍 点位: {{ totalPoints }}</span>
+                </div>
+            </div>
+            
+            <div class="upload-area">
+                <label class="upload-btn">
+                    <input type="file" accept=".json" @change="handleFileUpload" multiple>
+                    📁 上传 JSON 数据文件
+                </label>
+                <br><br>
+                <label class="upload-btn" style="margin-top: 10px;">
+                    <input type="file" accept=".csv" @change="handleCSVUpload" multiple>
+                    📊 上传 CSV 真值文件
+                </label>
+            </div>
+            
+            <div class="filter-section">
+                <input type="text" class="filter-input" v-model="filterText" placeholder="🔍 搜索轨迹ID、对象ID或飞行阶段...">
+            </div>
+            
+            <div class="select-all-bar">
+                <label>
+                    <input type="checkbox" :checked="isAllSelected" @change="toggleSelectAll">
+                    <span>{{ isAllSelected ? '全不选' : '全选' }}</span>
+                </label>
+                <div class="select-actions">
+                    <button class="btn-small" @click="selectAll">全选</button>
+                    <button class="btn-small" @click="deselectAll">全不选</button>
+                </div>
+            </div>
+            
+            <div class="track-list">
+                <div v-if="filteredTracks.length === 0" class="empty-state">
+                    <div class="empty-state-icon">📭</div>
+                    <div>{{ tracks.length === 0 ? '请上传数据文件' : '无匹配轨迹' }}</div>
+                </div>
+                
+                <div v-for="track in filteredTracks" :key="track.trackID" class="track-item" :class="{ active: selectedTracks.includes(track.trackID) }" @click="focusTrack(track)">
+                    <input type="checkbox" class="track-checkbox" :checked="selectedTracks.includes(track.trackID)" @click.stop="toggleTrack(track.trackID)">
+                    <div class="track-info">
+                        <div class="track-id">{{ track.trackID }}</div>
+                        <div class="track-meta">
+                            <span><span class="label">对象:</span> <span class="value">{{ track.objectID }}</span></span>
+                            <span><span class="label">阶段:</span> <span class="value">{{ track.flightStage || '未知' }}</span></span>
+                            <br>
+                            <span><span class="label">点位:</span> <span class="value">{{ track.points.length }}</span></span>
+                            <span><span class="label">时长:</span> <span class="value">{{ track.trackDuration || 'N/A' }}</span></span>
+                        </div>
+                    </div>
+                    <div class="track-color-indicator" :style="{ backgroundColor: track.color, color: track.color }"></div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="map-container">
+            <div id="map"></div>
+            
+            <div class="map-overlay">
+                <h3>📡 传感器信息</h3>
+                <div class="map-overlay-row"><span class="map-overlay-label">厂商ID</span><span class="map-overlay-value">{{ sensorInfo.manufacturerID || 'N/A' }}</span></div>
+                <div class="map-overlay-row"><span class="map-overlay-label">序列号</span><span class="map-overlay-value">{{ sensorInfo.sn || 'N/A' }}</span></div>
+                <div class="map-overlay-row"><span class="map-overlay-label">运营商</span><span class="map-overlay-value">{{ sensorInfo.operator || 'N/A' }}</span></div>
+                <div class="map-overlay-row"><span class="map-overlay-label">位置</span><span class="map-overlay-value">{{ sensorInfo.location || 'N/A' }}</span></div>
+                <div class="map-overlay-row"><span class="map-overlay-label">类型</span><span class="map-overlay-value">{{ sensorInfo.category || 'N/A' }}</span></div>
+            </div>
+            
+            <div class="legend">
+                <div class="legend-title">图例</div>
+                <div class="legend-item"><div class="legend-dot" style="background: #38bdf8;"></div><span>传感器位置</span></div>
+                <div class="legend-item"><div class="legend-line" style="background: #f59e0b;"></div><span>感知轨迹路径</span></div>
+                <div class="legend-item"><div class="legend-line" style="background: #22c55e;"></div><span>真值轨迹路径</span></div>
+                <div class="legend-item"><div class="legend-dot" style="background: #ef4444;"></div><span>轨迹起点</span></div>
+                <div class="legend-item"><div class="legend-dot" style="background: #3b82f6;"></div><span>轨迹终点</span></div>
+            </div>
+        </div>
+        
+        <!-- 右边栏 - 评分面板 -->
+        <div class="sidebar-right">
+            <div class="scoring-panel">
+                <h3>数据评测</h3>
+                
+                <div class="time-align-section">
+                    <label>⏱️ 时间偏移补偿 (毫秒)</label>
+                    <input type="number" v-model="timeOffset" placeholder="0" min="-10000" max="10000">
+                    <label style="margin-top: 8px;">📐 匹配时间窗口 (毫秒)</label>
+                    <input type="number" v-model="timeWindow" placeholder="500" min="100" max="5000">
+                </div>
+                
+                <button class="btn-score" @click="calculateScore" :disabled="!canScore">
+                    📊 开始评分
+                </button>
+                
+                <div v-if="scoreResult" class="score-result">
+                    <div class="score-header">
+                        <span class="score-value">{{ scoreResult.totalScore.toFixed(1) }}</span>
+                        <span class="score-label">综合评分</span>
+                    </div>
+                    
+                    <div v-for="metric in scoreResult.metrics" :key="metric.name" class="metric-item">
+                        <div class="metric-name">{{ metric.name }}</div>
+                        <div class="metric-bar-container">
+                            <div class="metric-bar" :class="metric.level" :style="{ width: metric.score + '%' }"></div>
+                        </div>
+                        <div class="metric-score">{{ metric.score.toFixed(1) }}分 - {{ metric.description }}</div>
+                    </div>
+                    
+                    <div v-if="scoreResult.warnings && scoreResult.warnings.length > 0" class="warnings-section">
+                        <h4>⚠️ 警告</h4>
+                        <div v-for="(warning, idx) in scoreResult.warnings" :key="idx" class="warning-item">
+                            {{ warning }}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref, computed, onMounted, watch } = Vue;
+        
+        createApp({
+            setup() {
+                const tracks = ref([]);
+                const groundTruthTracks = ref([]);
+                const selectedTracks = ref([]);
+                const filterText = ref('');
+                const map = ref(null);
+                const trackLayers = ref({});
+                const groundTruthLayers = ref({});
+                const sensorMarker = ref(null);
+                const sensorInfo = ref({});
+                
+                // Loading 状态
+                const isLoading = ref(false);
+                const loadingText = ref('处理中...');
+                const loadingSubtext = ref('请稍候');
+                
+                // 评分相关状态
+                const timeOffset = ref(0);
+                const timeWindow = ref(500);
+                const scoreResult = ref(null);
+                
+                const colorPool = ['#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1', '#14b8a6', '#d946ef', '#f43f5e', '#3b82f6'];
+                
+                // 设置 loading 状态
+                const setLoading = (loading, text = '处理中...', subtext = '请稍候') => {
+                    isLoading.value = loading;
+                    loadingText.value = text;
+                    loadingSubtext.value = subtext;
+                };
+                
+                const canScore = computed(() => {
+                    return tracks.value.length > 0 && groundTruthTracks.value.length > 0;
+                });
+                
+                const filteredTracks = computed(() => {
+                    if (!filterText.value.trim()) return tracks.value;
+                    const keyword = filterText.value.toLowerCase();
+                    return tracks.value.filter(t => 
+                        t.trackID.toLowerCase().includes(keyword) ||
+                        t.objectID.toLowerCase().includes(keyword) ||
+                        (t.flightStage && t.flightStage.toLowerCase().includes(keyword))
+                    );
+                });
+                
+                const isAllSelected = computed(() => {
+                    if (filteredTracks.value.length === 0) return false;
+                    return filteredTracks.value.every(t => selectedTracks.value.includes(t.trackID));
+                });
+                
+                const totalPoints = computed(() => tracks.value.reduce((sum, t) => sum + t.points.length, 0));
+                
+                const initMap = () => {
+                    map.value = L.map('map', { center: [22.867, 114.206], zoom: 14, zoomControl: true, attributionControl: false });
+                    // 使用高德卫星地图，降低不透明度让背景更暗
+                    L.tileLayer('https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}', {
+                        attribution: '© 高德地图',
+                        maxZoom: 18,
+                        opacity: 0.7
+                    }).addTo(map.value);
+                    // 添加路网图层，降低不透明度
+                    L.tileLayer('https://webst01.is.autonavi.com/appmaptile?style=8&x={x}&y={y}&z={z}', {
+                        attribution: '© 高德地图',
+                        maxZoom: 18,
+                        opacity: 0.6
+                    }).addTo(map.value);
+                    // 延迟调用 invalidateSize 确保容器尺寸正确
+                    setTimeout(() => {
+                        map.value.invalidateSize();
+                    }, 100);
+                };
+                
+                const handleFileUpload = (event) => {
+                    const files = event.target.files;
+                    if (files.length === 0) return;
+                    
+                    setLoading(true, '解析 JSON 文件...', '正在处理数据，请稍候');
+                    
+                    let processed = 0;
+                    const totalFiles = files.length;
+                    
+                    const completeProcessing = () => {
+                        processed++;
+                        if (processed === totalFiles) {
+                            setLoading(false);
+                        }
+                    };
+                    
+                    for (const file of files) {
+                        const reader = new FileReader();
+                        reader.onload = (e) => {
+                            try { 
+                                processData(JSON.parse(e.target.result)); 
+                            } catch (err) { 
+                                alert(`文件 ${file.name} 解析失败: ${err.message}`); 
+                            }
+                            completeProcessing();
+                        };
+                        // 添加错误处理，防止loading无法关闭
+                        reader.onerror = () => {
+                            alert(`文件 ${file.name} 读取失败`);
+                            completeProcessing();
+                        };
+                        reader.onabort = () => {
+                            alert(`文件 ${file.name} 读取被中断`);
+                            completeProcessing();
+                        };
+                        reader.readAsText(file);
+                    }
+                    event.target.value = '';
+                };
+                
+                const handleCSVUpload = (event) => {
+                    const files = event.target.files;
+                    if (files.length === 0) return;
+                    
+                    setLoading(true, '解析 CSV 文件...', '正在处理真值数据，请稍候');
+                    
+                    let processed = 0;
+                    const totalFiles = files.length;
+                    
+                    const completeProcessing = () => {
+                        processed++;
+                        if (processed === totalFiles) {
+                            setLoading(false);
+                        }
+                    };
+                    
+                    for (const file of files) {
+                        const reader = new FileReader();
+                        reader.onload = (e) => {
+                            try { 
+                                processCSVData(e.target.result, file.name, completeProcessing); 
+                            } catch (err) { 
+                                alert(`文件 ${file.name} 解析失败: ${err.message}`); 
+                                completeProcessing();
+                            }
+                        };
+                        reader.readAsText(file);
+                    }
+                    event.target.value = '';
+                };
+                
+                const processData = (data) => {
+                    // 清空旧数据
+                    tracks.value = [];
+                    selectedTracks.value = [];
+                    
+                    // 处理数组格式的数据源
+                    const uploadItems = Array.isArray(data) ? data : [data];
+                    
+                    uploadItems.forEach(uploadItem => {
+                        if (!uploadItem.data || !Array.isArray(uploadItem.data)) return;
+                        uploadItem.data.forEach(item => {
+                            if (item.sensor) {
+                                const s = item.sensor;
+                                sensorInfo.value = {
+                                    manufacturerID: s.sensorManufacturerID || '',
+                                    sn: s.sensorSN || '',
+                                    operator: s.sensorOperatorInfo?.entityName || '',
+                                    location: s.sensorLocation ? `${s.sensorLocation.latitude?.toFixed(4)}, ${s.sensorLocation.longitude?.toFixed(4)}` : '',
+                                    category: s.sensorExtra?.sensorCategory || ''
+                                };
+                                if (s.sensorLocation) updateSensorMarker(s.sensorLocation.latitude, s.sensorLocation.longitude, s);
+                            }
+                            if (item.perceivedStatus && Array.isArray(item.perceivedStatus)) {
+                                item.perceivedStatus.forEach(status => processTrack(status, item.CRS));
+                            }
+                        });
+                    });
+                    
+                    tracks.value.forEach(t => { if (!selectedTracks.value.includes(t.trackID)) selectedTracks.value.push(t.trackID); });
+                    updateMap();
+                };
+                
+                const processTrack = (status, crs) => {
+                    const trackID = status.trackID;
+                    let existingTrack = tracks.value.find(t => t.trackID === trackID);
+                    if (!existingTrack) {
+                        existingTrack = {
+                            trackID, objectID: status.objectID, flightStage: status.flightStage,
+                            trackDuration: status.trackDuration, sampleTime: status.sampleTime,
+                            points: [], color: colorPool[tracks.value.length % colorPool.length]
+                        };
+                        tracks.value.push(existingTrack);
+                    }
+                    
+                    // 优先从 trajectoryPoints 读取完整轨迹
+                    if (status.objectStatusExtra?.trajectoryPoints && Array.isArray(status.objectStatusExtra.trajectoryPoints)) {
+                        status.objectStatusExtra.trajectoryPoints.forEach(pos => {
+                            if (pos.longitude && pos.latitude) {
+                                existingTrack.points.push({
+                                    longitude: pos.longitude, latitude: pos.latitude, height: pos.height,
+                                    deltaLongitude: pos.deltaLongitude, deltaLatitude: pos.deltaLatitude,
+                                    deltaHeight: pos.deltaHeight, timestamp: pos.sampleTime
+                                });
+                            }
+                        });
+                    } else if (status.objectPosition && Array.isArray(status.objectPosition)) {
+                        // 降级到 objectPosition
+                        status.objectPosition.forEach(pos => {
+                            if (pos.positionBase === 'Ground' && pos.longitude && pos.latitude) {
+                                existingTrack.points.push({
+                                    longitude: pos.longitude, latitude: pos.latitude, height: pos.height,
+                                    deltaLongitude: pos.deltaLongitude, deltaLatitude: pos.deltaLatitude,
+                                    deltaHeight: pos.deltaHeight, timestamp: status.sampleTime
+                                });
+                            }
+                        });
+                    }
+                    
+                    existingTrack.points.sort((a, b) => a.timestamp - b.timestamp);
+                };
+                
+                const processCSVData = (csvText, fileName, onComplete) => {
+                    // 使用Web Worker处理CSV解析，避免阻塞主线程
+                    const worker = new Worker(URL.createObjectURL(new Blob([`
+                        self.onmessage = function(e) {
+                            const csvText = e.data.csvText;
+                            const fileName = e.data.fileName;
+                            const lines = csvText.trim().split('\\n');
+                            if (lines.length < 2) {
+                                self.postMessage({ success: false, error: 'CSV文件为空' });
+                                return;
+                            }
+                            
+                            const headers = lines[0].split(',').map(function(h) { return h.trim(); });
+                            var latIndex = -1, lonIndex = -1, timeIndex = -1, datetimeIndex = -1, altIndex = -1;
+                            for (var i = 0; i < headers.length; i++) {
+                                if (headers[i] === 'latitude') latIndex = i;
+                                else if (headers[i] === 'longitude') lonIndex = i;
+                                else if (headers[i] === 'time(millisecond)') timeIndex = i;
+                                else if (headers[i] === 'datetime(utc)') datetimeIndex = i;
+                                else if (headers[i] === 'altitude_above_seaLevel(feet)') altIndex = i;
+                            }
+                            
+                            if (latIndex === -1 || lonIndex === -1) {
+                                self.postMessage({ success: false, error: '缺少 latitude 或 longitude 列' });
+                                return;
+                            }
+                            
+                            const points = [];
+                            for (var i = 1; i < lines.length; i++) {
+                                const values = lines[i].split(',');
+                                if (values.length <= latIndex || values.length <= lonIndex) continue;
+                                
+                                const lat = parseFloat(values[latIndex]);
+                                const lon = parseFloat(values[lonIndex]);
+                                
+                                if (isNaN(lat) || isNaN(lon)) continue;
+                                
+                                var timestamp = 0;
+                                if (datetimeIndex !== -1 && values[datetimeIndex]) {
+                                    var date = new Date(values[datetimeIndex]);
+                                    timestamp = date.getTime();
+                                } else if (timeIndex !== -1) {
+                                    timestamp = parseInt(values[timeIndex]);
+                                }
+                                
+                                const point = {
+                                    latitude: lat,
+                                    longitude: lon,
+                                    timestamp: timestamp,
+                                    datetime: datetimeIndex !== -1 ? values[datetimeIndex] : '',
+                                    altitude: altIndex !== -1 ? parseFloat(values[altIndex]) : 0
+                                };
+                                points.push(point);
+                            }
+                            
+                            if (points.length > 0) {
+                                self.postMessage({ 
+                                    success: true, 
+                                    data: { 
+                                        trackID: 'GT-' + fileName,
+                                        objectID: fileName,
+                                        flightStage: 'GroundTruth',
+                                        points: points,
+                                        color: '#22c55e'
+                                    } 
+                                });
+                            } else {
+                                self.postMessage({ success: false, error: '没有有效的数据点' });
+                            }
+                        };
+                    `], { type: 'application/javascript' })));
+                    
+                    worker.onmessage = function(e) {
+                        worker.terminate();
+                        if (e.data.success) {
+                            groundTruthTracks.value = [e.data.data];
+                            updateMap();
+                        } else {
+                            alert('CSV解析错误: ' + e.data.error);
+                        }
+                        if (onComplete) onComplete();
+                    };
+                    
+                    worker.onerror = function(e) {
+                        worker.terminate();
+                        console.error('CSV解析Worker错误:', e);
+                        processCSVDataFallback(csvText, fileName);
+                        if (onComplete) onComplete();
+                    };
+                    
+                    worker.postMessage({ csvText, fileName });
+                };
+                
+                // 降级的同步解析方法
+                const processCSVDataFallback = (csvText, fileName) => {
+                    groundTruthTracks.value = [];
+                    
+                    const lines = csvText.trim().split('\n');
+                    if (lines.length < 2) return;
+                    
+                    const headers = lines[0].split(',').map(h => h.trim());
+                    const latIndex = headers.findIndex(h => h === 'latitude');
+                    const lonIndex = headers.findIndex(h => h === 'longitude');
+                    const timeIndex = headers.findIndex(h => h === 'time(millisecond)');
+                    const datetimeIndex = headers.findIndex(h => h === 'datetime(utc)');
+                    const altIndex = headers.findIndex(h => h === 'altitude_above_seaLevel(feet)');
+                    
+                    if (latIndex === -1 || lonIndex === -1) {
+                        alert('CSV 文件格式错误：缺少 latitude 或 longitude 列');
+                        return;
+                    }
+                    
+                    const points = [];
+                        for (let i = 1; i < lines.length; i++) {
+                            const values = lines[i].split(',');
+                            if (values.length <= latIndex || values.length <= lonIndex) continue;
+                            
+                            const lat = parseFloat(values[latIndex]);
+                            const lon = parseFloat(values[lonIndex]);
+                            
+                            if (isNaN(lat) || isNaN(lon)) continue;
+                            
+                            let timestamp = 0;
+                            if (datetimeIndex !== -1 && values[datetimeIndex]) {
+                                const date = new Date(values[datetimeIndex]);
+                                timestamp = date.getTime();
+                            } else if (timeIndex !== -1) {
+                                timestamp = parseInt(values[timeIndex]);
+                            }
+                            
+                            points.push({
+                                latitude: lat,
+                                longitude: lon,
+                                timestamp: timestamp,
+                                datetime: datetimeIndex !== -1 ? values[datetimeIndex] : '',
+                                altitude: altIndex !== -1 ? parseFloat(values[altIndex]) : 0
+                            });
+                        }
+                    
+                    if (points.length > 0) {
+                        groundTruthTracks.value.push({
+                            trackID: `GT-${fileName}`,
+                            objectID: fileName,
+                            flightStage: 'GroundTruth',
+                            points: points,
+                            color: '#22c55e'
+                        });
+                        updateMap();
+                    }
+                };
+                
+                const updateSensorMarker = (lat, lng, sensorData) => {
+                    if (sensorMarker.value) map.value.removeLayer(sensorMarker.value);
+                    const icon = L.divIcon({
+                        className: 'sensor-marker',
+                        html: `<div style="width:24px;height:24px;background:rgba(56,189,248,0.9);border:2px solid #fff;border-radius:50%;box-shadow:0 0 15px rgba(56,189,248,0.6);display:flex;align-items:center;justify-content:center;font-size:12px;color:white;">📡</div>`,
+                        iconSize: [24, 24], iconAnchor: [12, 12]
+                    });
+                    sensorMarker.value = L.marker([lat, lng], { icon }).addTo(map.value);
+                    sensorMarker.value.bindPopup(`
+                        <div class="sensor-popup"><h4>📡 传感器信息</h4>
+                        <p><span class="highlight">厂商ID:</span> ${sensorData.sensorManufacturerID || 'N/A'}</p>
+                        <p><span class="highlight">序列号:</span> ${sensorData.sensorSN || 'N/A'}</p>
+                        <p><span class="highlight">运营商:</span> ${sensorData.sensorOperatorInfo?.entityName || 'N/A'}</p>
+                        <p><span class="highlight">位置:</span> ${lat.toFixed(6)}, ${lng.toFixed(6)}</p>
+                        <p><span class="highlight">高度:</span> ${sensorData.sensorLocation?.height || 'N/A'} m</p>
+                        <p><span class="highlight">方位角:</span> ${sensorData.sensorPosture?.azimuth || 'N/A'}°</p>
+                        <p><span class="highlight">仰角:</span> ${sensorData.sensorPosture?.elevation || 'N/A'}°</p>
+                        <p><span class="highlight">类型:</span> ${sensorData.sensorExtra?.sensorCategory || 'N/A'}</p></div>
+                    `);
+                    map.value.setView([lat, lng], 14);
+                };
+                
+                const updateMap = () => {
+                    // 清除旧的感知轨迹图层
+                    Object.values(trackLayers.value).forEach(layer => {
+                        if (layer.polyline) map.value.removeLayer(layer.polyline);
+                        if (layer.startMarker) map.value.removeLayer(layer.startMarker);
+                        if (layer.endMarker) map.value.removeLayer(layer.endMarker);
+                        if (layer.pointMarkers) layer.pointMarkers.forEach(m => map.value.removeLayer(m));
+                    });
+                    trackLayers.value = {};
+                    
+                    // 清除旧的真值轨迹图层
+                    Object.values(groundTruthLayers.value).forEach(layer => {
+                        if (layer.polyline) map.value.removeLayer(layer.polyline);
+                        if (layer.startMarker) map.value.removeLayer(layer.startMarker);
+                        if (layer.endMarker) map.value.removeLayer(layer.endMarker);
+                        if (layer.pointMarkers) layer.pointMarkers.forEach(m => map.value.removeLayer(m));
+                    });
+                    groundTruthLayers.value = {};
+                    
+                    // 绘制感知轨迹
+                    tracks.value.forEach(track => {
+                        if (!selectedTracks.value.includes(track.trackID)) return;
+                        if (track.points.length === 0) return;
+                        const latlngs = track.points.map(p => [p.latitude, p.longitude]);
+                        const color = track.color;
+                        
+                        const polyline = L.polyline(latlngs, { color, weight: 3, opacity: 0.8, lineCap: 'round', lineJoin: 'round' }).addTo(map.value);
+                        
+                        // 使用 CircleMarker 替代 divIcon，确保缩放时位置正确
+                        const startMarker = L.circleMarker(latlngs[0], { 
+                            radius: 7, 
+                            fillColor: '#ef4444', 
+                            color: '#fff', 
+                            weight: 2, 
+                            fillOpacity: 1 
+                        }).addTo(map.value);
+                        startMarker.bindPopup(`<b>起点</b><br>轨迹: ${track.trackID}`);
+                        
+                        const endMarker = L.circleMarker(latlngs[latlngs.length - 1], { 
+                            radius: 7, 
+                            fillColor: '#3b82f6', 
+                            color: '#fff', 
+                            weight: 2, 
+                            fillOpacity: 1 
+                        }).addTo(map.value);
+                        endMarker.bindPopup(`<b>终点</b><br>轨迹: ${track.trackID}`);
+                        
+                        const pointMarkers = [];
+                        track.points.forEach((p, idx) => {
+                            if (idx === 0 || idx === track.points.length - 1) return;
+                            // 使用 CircleMarker 确保缩放时位置稳定
+                            const marker = L.circleMarker([p.latitude, p.longitude], { 
+                                radius: 4, 
+                                fillColor: color, 
+                                color: '#fff', 
+                                weight: 1, 
+                                fillOpacity: 0.7 
+                            }).addTo(map.value);
+                            marker.bindPopup(`<div style="font-size:12px;"><b>轨迹点 #${idx + 1}</b><br>经度: ${p.longitude.toFixed(6)}<br>纬度: ${p.latitude.toFixed(6)}<br>高度: ${p.height || 'N/A'} m<br>时间: ${new Date(p.timestamp).toLocaleString()}</div>`);
+                            pointMarkers.push(marker);
+                        });
+                        
+                        polyline.on('click', () => focusTrack(track));
+                        trackLayers.value[track.trackID] = { polyline, startMarker, endMarker, pointMarkers };
+                    });
+                    
+                    // 绘制真值轨迹
+                    groundTruthTracks.value.forEach(track => {
+                        if (track.points.length === 0) return;
+                        const latlngs = track.points.map(p => [p.latitude, p.longitude]);
+                        const color = track.color;
+                        
+                        const polyline = L.polyline(latlngs, { color, weight: 3, opacity: 0.9, lineCap: 'round', lineJoin: 'round', dashArray: '10, 10' }).addTo(map.value);
+                        
+                        // 使用 CircleMarker 替代 divIcon
+                        const startMarker = L.circleMarker(latlngs[0], { 
+                            radius: 7, 
+                            fillColor: '#ef4444', 
+                            color: '#fff', 
+                            weight: 2, 
+                            fillOpacity: 1 
+                        }).addTo(map.value);
+                        startMarker.bindPopup(`<b>真值起点</b><br>文件: ${track.objectID}`);
+                        
+                        const endMarker = L.circleMarker(latlngs[latlngs.length - 1], { 
+                            radius: 7, 
+                            fillColor: '#3b82f6', 
+                            color: '#fff', 
+                            weight: 2, 
+                            fillOpacity: 1 
+                        }).addTo(map.value);
+                        endMarker.bindPopup(`<b>真值终点</b><br>文件: ${track.objectID}`);
+                        
+                        const pointMarkers = [];
+                        track.points.forEach((p, idx) => {
+                            if (idx === 0 || idx === track.points.length - 1) return;
+                            // 使用 CircleMarker 确保缩放时位置稳定
+                            const marker = L.circleMarker([p.latitude, p.longitude], { 
+                                radius: 4, 
+                                fillColor: color, 
+                                color: '#fff', 
+                                weight: 1, 
+                                fillOpacity: 0.7 
+                            }).addTo(map.value);
+                            marker.bindPopup(`<div style="font-size:12px;"><b>真值点 #${idx + 1}</b><br>经度: ${p.longitude.toFixed(6)}<br>纬度: ${p.latitude.toFixed(6)}<br>高度: ${p.altitude || 'N/A'} ft<br>时间: ${p.datetime || 'N/A'}</div>`);
+                            pointMarkers.push(marker);
+                        });
+                        
+                        groundTruthLayers.value[track.trackID] = { polyline, startMarker, endMarker, pointMarkers };
+                    });
+                    
+                    // 自动调整地图视野
+                    const allPoints = [];
+                    tracks.value.filter(t => selectedTracks.value.includes(t.trackID)).forEach(t => {
+                        t.points.forEach(p => allPoints.push([p.latitude, p.longitude]));
+                    });
+                    groundTruthTracks.value.forEach(t => {
+                        t.points.forEach(p => allPoints.push([p.latitude, p.longitude]));
+                    });
+                    
+                    if (allPoints.length > 0 && map.value) {
+                        map.value.fitBounds(allPoints, { padding: [50, 50] });
+                    }
+                };
+                
+                const toggleTrack = (trackID) => {
+                    const idx = selectedTracks.value.indexOf(trackID);
+                    if (idx > -1) {
+                        selectedTracks.value.splice(idx, 1);
+                        hideTrack(trackID);
+                    } else {
+                        selectedTracks.value.push(trackID);
+                        showTrack(trackID);
+                    }
+                };
+                
+                const selectAll = () => { 
+                    // 先隐藏所有已选中的轨迹
+                    selectedTracks.value.forEach(trackID => hideTrack(trackID));
+                    // 更新选中状态
+                    selectedTracks.value = filteredTracks.value.map(t => t.trackID);
+                    // 批量显示轨迹（优化性能）
+                    batchShowTracks(selectedTracks.value);
+                };
+                
+                const deselectAll = () => { 
+                    // 隐藏所有轨迹
+                    selectedTracks.value.forEach(trackID => hideTrack(trackID));
+                    selectedTracks.value = [];
+                };
+                
+                const toggleSelectAll = () => { isAllSelected.value ? deselectAll() : selectAll(); };
+                
+                // 显示单个轨迹
+                const showTrack = (trackID) => {
+                    const track = tracks.value.find(t => t.trackID === trackID);
+                    if (!track || track.points.length === 0) return;
+                    
+                    const latlngs = track.points.map(p => [p.latitude, p.longitude]);
+                    const color = track.color;
+                    
+                    const polyline = L.polyline(latlngs, { color, weight: 3, opacity: 0.8, lineCap: 'round', lineJoin: 'round' }).addTo(map.value);
+                    
+                    const startMarker = L.circleMarker(latlngs[0], { 
+                        radius: 7, 
+                        fillColor: '#ef4444', 
+                        color: '#fff', 
+                        weight: 2, 
+                        fillOpacity: 1 
+                    }).addTo(map.value);
+                    startMarker.bindPopup(`<b>起点</b><br>轨迹: ${track.trackID}`);
+                    
+                    const endMarker = L.circleMarker(latlngs[latlngs.length - 1], { 
+                        radius: 7, 
+                        fillColor: '#3b82f6', 
+                        color: '#fff', 
+                        weight: 2, 
+                        fillOpacity: 1 
+                    }).addTo(map.value);
+                    endMarker.bindPopup(`<b>终点</b><br>轨迹: ${track.trackID}`);
+                    
+                    const pointMarkers = [];
+                    track.points.forEach((p, idx) => {
+                        if (idx === 0 || idx === track.points.length - 1) return;
+                        const marker = L.circleMarker([p.latitude, p.longitude], { 
+                            radius: 4, 
+                            fillColor: color, 
+                            color: '#fff', 
+                            weight: 1, 
+                            fillOpacity: 0.7 
+                        }).addTo(map.value);
+                        marker.bindPopup(`<div style="font-size:12px;"><b>轨迹点 #${idx + 1}</b><br>经度: ${p.longitude.toFixed(6)}<br>纬度: ${p.latitude.toFixed(6)}<br>高度: ${p.height || 'N/A'} m<br>时间: ${new Date(p.timestamp).toLocaleString()}</div>`);
+                        pointMarkers.push(marker);
+                    });
+                    
+                    polyline.on('click', () => focusTrack(track));
+                    trackLayers.value[track.trackID] = { polyline, startMarker, endMarker, pointMarkers };
+                };
+                
+                // 隐藏单个轨迹
+                const hideTrack = (trackID) => {
+                    const layer = trackLayers.value[trackID];
+                    if (!layer) return;
+                    
+                    if (layer.polyline) map.value.removeLayer(layer.polyline);
+                    if (layer.startMarker) map.value.removeLayer(layer.startMarker);
+                    if (layer.endMarker) map.value.removeLayer(layer.endMarker);
+                    if (layer.pointMarkers) layer.pointMarkers.forEach(m => map.value.removeLayer(m));
+                    
+                    delete trackLayers.value[trackID];
+                };
+                
+                // 批量显示轨迹（优化性能）
+                const batchShowTracks = (trackIDs) => {
+                    trackIDs.forEach(trackID => {
+                        if (!trackLayers.value[trackID]) {
+                            showTrack(trackID);
+                        }
+                    });
+                    
+                    // 调整视野
+                    const allPoints = [];
+                    trackIDs.forEach(trackID => {
+                        const track = tracks.value.find(t => t.trackID === trackID);
+                        if (track) {
+                            track.points.forEach(p => allPoints.push([p.latitude, p.longitude]));
+                        }
+                    });
+                    groundTruthTracks.value.forEach(t => {
+                        t.points.forEach(p => allPoints.push([p.latitude, p.longitude]));
+                    });
+                    
+                    if (allPoints.length > 0) map.value.fitBounds(allPoints, { padding: [50, 50] });
+                };
+                
+                const focusTrack = (track) => {
+                    if (!selectedTracks.value.includes(track.trackID)) { 
+                        selectedTracks.value.push(track.trackID); 
+                        showTrack(track.trackID);
+                    }
+                    if (track.points.length > 0) {
+                        const bounds = track.points.map(p => [p.latitude, p.longitude]);
+                        map.value.fitBounds(bounds, { padding: [80, 80], maxZoom: 16 });
+                    }
+                };
+                
+
+                
+                const loadDemoData = () => {
+                    const demoData = {"dataType":"PerceivedStatusUpload","version":"2.0beta","source":"CMCC-SZ","uploadTime":1711080531000,"data":[{"sensor":{"sensorManufacturerID":"9144030031946486XD","sensorSN":"NHGJFGTD284364529","sensorOperatorInfo":{"entityID":"91310106575869283X","entityName":"中国移动有限公司","entityType":"For-profitLegalPerson","phone":"852-61234567"},"sensorLocation":{"longitude":114.2058468,"latitude":22.8668765,"height":25.15},"sensorPosture":{"azimuth":348.0,"elevation":10.0,"twist":0.0},"sensorExtra":{"sensorCategory":"5G-A"}},"CRS":"WGS84","heightDesc":{"heightType":"HAE"},"perceivedStatus":[{"trackID":"CMCC-SZ-82723123727295-20240515-T0000008","objectID":"CMCC-SZ-82723123727295","sampleTime":1711080530000,"trackDuration":"PT2M","flightStage":"TakingOff","objectPosition":[{"positionBase":"Ground","longitude":114.2073234,"latitude":22.8678524,"height":157.35,"deltaLongitude":0.25,"deltaLatitude":0.54,"deltaHeight":0.72},{"positionBase":"Sensor","range":48.0,"azimuth":10.0,"elevation":3.0}],"objectVelocity":[{"velocityBase":"Ground","GS":31.3,"VS":1.0,"trackAngle":22.1,"deltaGS":1.0,"deltaVS":0.2}],"objectStatusExtra":null}]}]};
+                    processData(demoData);
+                };
+                
+                const calculateDistance = (lat1, lng1, lat2, lng2) => {
+                    const R = 6371000;
+                    const dLat = (lat2 - lat1) * Math.PI / 180;
+                    const dLng = (lng2 - lng1) * Math.PI / 180;
+                    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                              Math.sin(dLng / 2) * Math.sin(dLng / 2);
+                    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+                    return R * c;
+                };
+                
+                const findMatchingGroundTruthPoint = (trackPoint, groundTruthTracks) => {
+                    const targetTimestamp = trackPoint.timestamp + (parseInt(timeOffset.value) || 0);
+                    const windowSize = parseInt(timeWindow.value) || 500;
+                    
+                    let bestMatch = null;
+                    let minTimeDiff = Infinity;
+                    
+                    groundTruthTracks.forEach(gtTrack => {
+                        gtTrack.points.forEach(gtPoint => {
+                            const gtTimestamp = gtPoint.timestamp;
+                            const timeDiff = Math.abs(gtTimestamp - targetTimestamp);
+                            
+                            if (timeDiff <= windowSize && timeDiff < minTimeDiff) {
+                                minTimeDiff = timeDiff;
+                                bestMatch = gtPoint;
+                            }
+                        });
+                    });
+                    
+                    return bestMatch;
+                };
+                
+                const detectMissingFields = (tracks) => {
+                    const warnings = [];
+                    const requiredFields = ['trackID', 'objectID', 'sampleTime', 'objectPosition'];
+                    
+                    tracks.forEach((track, trackIndex) => {
+                        requiredFields.forEach(field => {
+                            if (!track[field]) {
+                                warnings.push(`轨迹 ${track.trackID || '#' + trackIndex}: 缺少必需字段 "${field}"`);
+                            }
+                        });
+                        
+                        if (track.objectPosition && track.objectPosition.length > 0) {
+                            const pos = track.objectPosition[0];
+                            if (pos.positionBase === 'Ground') {
+                                if (pos.longitude === undefined || pos.longitude === null) {
+                                    warnings.push(`轨迹 ${track.trackID}: 缺少经度(longitude)`);
+                                }
+                                if (pos.latitude === undefined || pos.latitude === null) {
+                                    warnings.push(`轨迹 ${track.trackID}: 缺少纬度(latitude)`);
+                                }
+                                if (pos.height === undefined || pos.height === null) {
+                                    warnings.push(`轨迹 ${track.trackID}: 缺少高度(height)`);
+                                }
+                            }
+                        }
+                        
+                        if (track.objectVelocity && track.objectVelocity.length > 0) {
+                            const vel = track.objectVelocity[0];
+                            if (vel.GS === undefined || vel.GS === null) {
+                                warnings.push(`轨迹 ${track.trackID}: 缺少地速(GS)`);
+                            }
+                            if (vel.VS === undefined || vel.VS === null) {
+                                warnings.push(`轨迹 ${track.trackID}: 缺少垂直速度(VS)`);
+                            }
+                        }
+                        
+                        if (!track.objectStatusExtra?.trajectoryPoints || track.objectStatusExtra.trajectoryPoints.length === 0) {
+                            warnings.push(`轨迹 ${track.trackID}: 缺少轨迹点数据(trajectoryPoints)`);
+                        }
+                    });
+                    
+                    return warnings;
+                };
+                
+                const calculateScore = () => {
+                    if (!canScore.value) return;
+                    
+                    setLoading(true, '评分计算中...', '正在对齐数据并计算指标');
+                    
+                    setTimeout(() => {
+                        const allTrackPoints = [];
+                        tracks.value.forEach(track => {
+                            if (track.objectStatusExtra?.trajectoryPoints) {
+                                track.objectStatusExtra.trajectoryPoints.forEach(p => {
+                                    allTrackPoints.push({
+                                        ...p,
+                                        trackID: track.trackID,
+                                        objectID: track.objectID
+                                    });
+                                });
+                            }
+                        });
+                        
+                        const matchedPoints = [];
+                        const unmatchedPoints = [];
+                        
+                        allTrackPoints.forEach(trackPoint => {
+                            const gtPoint = findMatchingGroundTruthPoint(trackPoint, groundTruthTracks.value);
+                            if (gtPoint) {
+                                matchedPoints.push({
+                                    trackPoint,
+                                    gtPoint,
+                                    distance: calculateDistance(trackPoint.latitude, trackPoint.longitude, gtPoint.latitude, gtPoint.longitude),
+                                    heightDiff: Math.abs((trackPoint.height || 0) - (gtPoint.altitude || 0))
+                                });
+                            } else {
+                                unmatchedPoints.push(trackPoint);
+                            }
+                        });
+                        
+                        const totalPointsCount = allTrackPoints.length;
+                        const matchedCount = matchedPoints.length;
+                        const matchRate = totalPointsCount > 0 ? matchedCount / totalPointsCount : 0;
+                        
+                        const avgDistance = matchedPoints.length > 0 
+                            ? matchedPoints.reduce((sum, m) => sum + m.distance, 0) / matchedPoints.length 
+                            : Infinity;
+                        
+                        const avgHeightDiff = matchedPoints.length > 0 
+                            ? matchedPoints.reduce((sum, m) => sum + m.heightDiff, 0) / matchedPoints.length 
+                            : Infinity;
+                        
+                        const maxDistance = matchedPoints.length > 0 
+                            ? Math.max(...matchedPoints.map(m => m.distance)) 
+                            : Infinity;
+                        
+                        const matchScore = Math.min(100, matchRate * 100);
+                        
+                        let distanceScore = 100;
+                        if (avgDistance <= 5) distanceScore = 100;
+                        else if (avgDistance <= 10) distanceScore = 90;
+                        else if (avgDistance <= 20) distanceScore = 80;
+                        else if (avgDistance <= 50) distanceScore = 60;
+                        else if (avgDistance <= 100) distanceScore = 40;
+                        else distanceScore = Math.max(0, 100 - avgDistance);
+                        
+                        let heightScore = 100;
+                        if (avgHeightDiff <= 5) heightScore = 100;
+                        else if (avgHeightDiff <= 10) heightScore = 90;
+                        else if (avgHeightDiff <= 30) heightScore = 80;
+                        else if (avgHeightDiff <= 50) heightScore = 60;
+                        else if (avgHeightDiff <= 100) heightScore = 40;
+                        else heightScore = Math.max(0, 100 - avgHeightDiff * 0.5);
+                        
+                        const coverageScore = matchedPoints.length > 0 ? Math.min(100, (matchedPoints.length / (groundTruthTracks.value.reduce((sum, t) => sum + t.points.length, 0) || 1)) * 100) : 0;
+                        
+                        const warnings = detectMissingFields(tracks.value);
+                        
+                        if (unmatchedPoints.length > 0) {
+                            warnings.push(`有 ${unmatchedPoints.length} 个感知点无法在真值轨迹中找到匹配`);
+                        }
+                        
+                        const metrics = [
+                            {
+                                name: '点位匹配率',
+                                score: matchScore,
+                                level: matchScore >= 80 ? 'excellent' : matchScore >= 50 ? 'good' : 'poor',
+                                description: `匹配 ${matchedCount}/${totalPointsCount} 个点位`
+                            },
+                            {
+                                name: '水平距离精度',
+                                score: distanceScore,
+                                level: distanceScore >= 80 ? 'excellent' : distanceScore >= 50 ? 'good' : 'poor',
+                                description: `平均误差 ${avgDistance.toFixed(2)}m，最大误差 ${maxDistance.toFixed(2)}m`
+                            },
+                            {
+                                name: '高度精度',
+                                score: heightScore,
+                                level: heightScore >= 80 ? 'excellent' : heightScore >= 50 ? 'good' : 'poor',
+                                description: `平均误差 ${avgHeightDiff.toFixed(2)}m`
+                            },
+                            {
+                                name: '轨迹覆盖率',
+                                score: coverageScore,
+                                level: coverageScore >= 80 ? 'excellent' : coverageScore >= 50 ? 'good' : 'poor',
+                                description: `覆盖真值轨迹的 ${coverageScore.toFixed(1)}%`
+                            }
+                        ];
+                        
+                        const totalScore = (matchScore * 0.3 + distanceScore * 0.3 + heightScore * 0.2 + coverageScore * 0.2);
+                        
+                        scoreResult.value = {
+                            totalScore,
+                            metrics,
+                            warnings
+                        };
+                        
+                        setLoading(false);
+                    }, 100);
+                };
+                
+                onMounted(() => { initMap(); loadDemoData(); });
+                
+                return { 
+                    tracks, selectedTracks, filterText, filteredTracks, isAllSelected, totalPoints, sensorInfo, 
+                    handleFileUpload, handleCSVUpload, toggleTrack, selectAll, deselectAll, toggleSelectAll, focusTrack,
+                    isLoading, loadingText, loadingSubtext,
+                    timeOffset, timeWindow, scoreResult, canScore, calculateScore
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
