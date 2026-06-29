@@ -427,8 +427,12 @@
                 <div class="time-align-section">
                     <label>⏱️ 时间偏移补偿 (毫秒)</label>
                     <input type="number" v-model="timeOffset" placeholder="0" min="-10000" max="10000">
-                    <label style="margin-top: 8px;">📐 匹配时间窗口 (毫秒)</label>
-                    <input type="number" v-model="timeWindow" placeholder="500" min="100" max="5000">
+                    <label style="margin-top: 8px;">⏲️ 匹配时间窗口 (毫秒)</label>
+                    <input type="number" v-model="timeToleranceMs" placeholder="2000" min="100" max="10000">
+                    <label style="margin-top: 8px;">📏 匹配空间窗口 (米)</label>
+                    <input type="number" v-model="distanceToleranceM" placeholder="150" min="1" max="1000">
+                    <label style="margin-top: 8px;">🌐 真值邻域 (米)</label>
+                    <input type="number" v-model="groundTruthNeighborhoodM" placeholder="50" min="1" max="500">
                 </div>
                 
                 <button class="btn-score" @click="calculateScore" :disabled="!canScore">
@@ -448,7 +452,7 @@
                     <div v-for="metric in scoreResult.metrics" :key="metric.name" class="metric-item">
                         <div class="metric-name">{{ metric.name }}</div>
                         <div class="metric-bar-container">
-                            <div class="metric-bar" :class="metric.level" :style="{ width: metric.score + '%' }"></div>
+                            <div class="metric-bar" :class="metric.level" :style="{ width: (metric.score / 10 * 100) + '%' }"></div>
                         </div>
                         <div class="metric-score">{{ metric.score.toFixed(1) }}分 - {{ metric.description }}</div>
                     </div>
@@ -487,7 +491,9 @@
                 
                 // 评分相关状态
                 const timeOffset = ref(0);
-                const timeWindow = ref(500);
+                const timeToleranceMs = ref(2000);
+                const distanceToleranceM = ref(150);
+                const groundTruthNeighborhoodM = ref(50);
                 const scoreResult = ref(null);
                 
                 const colorPool = ['#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1', '#14b8a6', '#d946ef', '#f43f5e', '#3b82f6'];
@@ -647,6 +653,7 @@
                                 const lonIndex = headers.indexOf('longitude');
                                 const datetimeIndex = headers.indexOf('datetime(utc)');
                                 const altIndex = headers.indexOf('altitude_above_seaLevel(feet)');
+                                const speedIndex = headers.indexOf('speed(mph)') !== -1 ? headers.indexOf('speed(mph)') : headers.indexOf('speed');
                                 
                                 if (latIndex === -1 || lonIndex === -1) {
                                     alert('CSV 文件格式错误：缺少 latitude 或 longitude 列');
@@ -657,6 +664,7 @@
                                 const points = [];
                                 const parseFn = parseFloat;
                                 const hasDateTime = datetimeIndex !== -1;
+                                const hasSpeed = speedIndex !== -1;
                                 
                                 for (let i = 1; i < lines.length; i++) {
                                     const line = lines[i];
@@ -680,12 +688,18 @@
                                         altitude = parseFn(values[altIndex]) * 0.3048;
                                     }
                                     
+                                    let GS = 0;
+                                    if (hasSpeed && values[speedIndex]) {
+                                        GS = parseFn(values[speedIndex]) * 0.44704;
+                                    }
+                                    
                                     points.push({
                                         latitude: lat,
                                         longitude: lon,
                                         timestamp: timestamp,
                                         datetime: hasDateTime ? values[datetimeIndex] : '',
-                                        altitude: altitude
+                                        altitude: altitude,
+                                        GS: GS
                                     });
                                 }
                                 
@@ -788,7 +802,8 @@
                                 existingTrack.points.push({
                                     longitude: pos.longitude, latitude: pos.latitude, height: pos.height,
                                     deltaLongitude: pos.deltaLongitude, deltaLatitude: pos.deltaLatitude,
-                                    deltaHeight: pos.deltaHeight, timestamp: pos.sampleTime
+                                    deltaHeight: pos.deltaHeight, timestamp: pos.sampleTime,
+                                    GS: pos.GS, VS: pos.VS, trackAngle: pos.trackAngle
                                 });
                             }
                         });
@@ -796,10 +811,13 @@
                         // 降级到 objectPosition
                         status.objectPosition.forEach(pos => {
                             if (pos.positionBase === 'Ground' && pos.longitude && pos.latitude) {
+                                // 从 objectVelocity 获取速度信息
+                                const velocity = status.objectVelocity?.find(v => v.velocityBase === 'Ground');
                                 existingTrack.points.push({
                                     longitude: pos.longitude, latitude: pos.latitude, height: pos.height,
                                     deltaLongitude: pos.deltaLongitude, deltaLatitude: pos.deltaLatitude,
-                                    deltaHeight: pos.deltaHeight, timestamp: status.sampleTime
+                                    deltaHeight: pos.deltaHeight, timestamp: status.sampleTime,
+                                    GS: velocity?.GS, VS: velocity?.VS, trackAngle: velocity?.trackAngle
                                 });
                             }
                         });
@@ -1098,6 +1116,20 @@
                     return R * c;
                 };
                 
+                const calculateBearing = (lat1, lng1, lat2, lng2) => {
+                    const lat1Rad = lat1 * Math.PI / 180;
+                    const lng1Rad = lng1 * Math.PI / 180;
+                    const lat2Rad = lat2 * Math.PI / 180;
+                    const lng2Rad = lng2 * Math.PI / 180;
+                    
+                    const dLng = lng2Rad - lng1Rad;
+                    const y = Math.sin(dLng) * Math.cos(lat2Rad);
+                    const x = Math.cos(lat1Rad) * Math.sin(lat2Rad) -
+                              Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(dLng);
+                    const bearing = Math.atan2(y, x);
+                    return bearing;
+                };
+                
                 const detectTimeOffset = (trackPoints, groundTruthPoints) => {
                     if (trackPoints.length === 0 || groundTruthPoints.length === 0) {
                         return { offset: 0, confidence: 0, sampleCount: 0 };
@@ -1158,9 +1190,10 @@
                     return { offset: 0, confidence: 30, sampleCount: validTrackPoints.length };
                 };
                 
-                const findMatchingGroundTruthPoint = (trackPoint, sortedGtPoints, timeOffset) => {
+                const findMatchingGroundTruthPoint = (trackPoint, sortedGtPoints, timeOffset, timeToleranceMs, distanceToleranceM) => {
                     const targetTimestamp = trackPoint.timestamp + timeOffset;
-                    const windowSize = 1000; // 1秒窗口（严格匹配）
+                    const windowSize = parseInt(timeToleranceMs) || 2000;
+                    const distanceThreshold = parseInt(distanceToleranceM) || 150;
                     
                     if (sortedGtPoints.length === 0) return null;
                     
@@ -1187,12 +1220,9 @@
                     }
                     
                     if (candidates.length === 0) return null;
-                    if (candidates.length === 1) return candidates[0];
                     
-                    // 选择距离最近的点
-                    let bestMatch = null;
-                    let minDistance = Infinity;
-                    
+                    // 筛选出空间距离在阈值内的点
+                    const validCandidates = [];
                     candidates.forEach(gp => {
                         const dist = calculateDistance(
                             trackPoint.latitude, 
@@ -1200,9 +1230,22 @@
                             gp.latitude, 
                             gp.longitude
                         );
-                        if (dist < minDistance) {
-                            minDistance = dist;
-                            bestMatch = gp;
+                        if (dist <= distanceThreshold) {
+                            validCandidates.push({ point: gp, distance: dist });
+                        }
+                    });
+                    
+                    if (validCandidates.length === 0) return null;
+                    if (validCandidates.length === 1) return validCandidates[0].point;
+                    
+                    // 选择距离最近的点
+                    let bestMatch = null;
+                    let minDistance = Infinity;
+                    
+                    validCandidates.forEach(c => {
+                        if (c.distance < minDistance) {
+                            minDistance = c.distance;
+                            bestMatch = c.point;
                         }
                     });
                     
@@ -1375,7 +1418,7 @@
                         const unmatchedPoints = [];
                         
                         allTrackPoints.forEach((trackPoint, trackIdx) => {
-                            const gtPoint = findMatchingGroundTruthPoint(trackPoint, sortedGtPoints, effectiveOffset);
+                            const gtPoint = findMatchingGroundTruthPoint(trackPoint, sortedGtPoints, effectiveOffset, timeToleranceMs.value, distanceToleranceM.value);
                             if (gtPoint) {
                                 // 找到真值点在数组中的序号
                                 const gtIdx = sortedGtPoints.findIndex(p => p.timestamp === gtPoint.timestamp && p.latitude === gtPoint.latitude && p.longitude === gtPoint.longitude);
@@ -1449,44 +1492,277 @@
                             console.log('  高度误差:', maxDistanceMatch.heightDiff.toFixed(2), 'm');
                         }
                         
-                        // 用户已手动选择轨迹，直接使用匹配结果（不再自动过滤干扰目标）
-                        const totalPointsCount = allTrackPoints.length;
-                        const matchedCount = validMatches.length;
-                        const matchRate = totalPointsCount > 0 ? matchedCount / totalPointsCount : 0;
+                        // === 9项指标计算 ===
                         
-                        const avgDistance = validMatches.length > 0 
-                            ? validMatches.reduce((sum, m) => sum + m.distance, 0) / validMatches.length 
+                        // 1. 3D定位误差
+                        const positionErrors = validMatches.map(m => {
+                            const dh = m.distance;
+                            const dz = m.heightDiff;
+                            return Math.sqrt(dh * dh + dz * dz);
+                        });
+                        const avgPositionError = positionErrors.length > 0 
+                            ? positionErrors.reduce((sum, e) => sum + e, 0) / positionErrors.length 
+                            : Infinity;
+                        const maxPositionError = positionErrors.length > 0 
+                            ? Math.max(...positionErrors) 
                             : Infinity;
                         
-                        const avgHeightDiff = validMatches.length > 0 
-                            ? validMatches.reduce((sum, m) => sum + m.heightDiff, 0) / validMatches.length 
-                            : Infinity;
+                        // 2. 虚警率计算
+                        const neighborhoodThreshold = parseInt(groundTruthNeighborhoodM.value) || 50;
+                        const windowSize = parseInt(timeToleranceMs.value) || 2000;
+                        let falseAlarmCount = 0;
+                        allTrackPoints.forEach(trackPoint => {
+                            const targetTs = trackPoint.timestamp + effectiveOffset;
+                            let hasNeighbor = false;
+                            for (const gp of sortedGtPoints) {
+                                if (Math.abs(gp.timestamp - targetTs) > windowSize) continue;
+                                const dist = calculateDistance(trackPoint.latitude, trackPoint.longitude, gp.latitude, gp.longitude);
+                                if (dist <= neighborhoodThreshold) {
+                                    hasNeighbor = true;
+                                    break;
+                                }
+                            }
+                            if (!hasNeighbor) falseAlarmCount++;
+                        });
+                        const falseAlarmRate = allTrackPoints.length > 0 ? falseAlarmCount / allTrackPoints.length : 0;
                         
-                        const maxDistance = validMatches.length > 0 
-                            ? Math.max(...validMatches.map(m => m.distance)) 
-                            : Infinity;
+                        // 3. 漏检率计算
+                        let missCount = 0;
+                        sortedGtPoints.forEach(gtPoint => {
+                            let hasNeighbor = false;
+                            for (const tp of allTrackPoints) {
+                                const targetTs = tp.timestamp + effectiveOffset;
+                                if (Math.abs(gtPoint.timestamp - targetTs) > windowSize) continue;
+                                const dist = calculateDistance(tp.latitude, tp.longitude, gtPoint.latitude, gtPoint.longitude);
+                                if (dist <= neighborhoodThreshold) {
+                                    hasNeighbor = true;
+                                    break;
+                                }
+                            }
+                            if (!hasNeighbor) missCount++;
+                        });
+                        const missRate = sortedGtPoints.length > 0 ? missCount / sortedGtPoints.length : 0;
                         
-                        const matchScore = Math.min(100, matchRate * 100);
+                        // 4. 速度误差（需要GS字段）
+                        let speedErrors = [];
+                        validMatches.forEach(m => {
+                            const sensingGS = m.trackPoint.GS || m.trackPoint.groundSpeed || m.trackPoint.speed;
+                            const truthGS = m.gtPoint.GS || m.gtPoint.groundSpeed || m.gtPoint.speed;
+                            if (sensingGS !== undefined && truthGS !== undefined) {
+                                speedErrors.push(Math.abs(sensingGS - truthGS));
+                            }
+                        });
+                        const avgSpeedError = speedErrors.length > 0 
+                            ? speedErrors.reduce((sum, e) => sum + e, 0) / speedErrors.length 
+                            : null;
                         
-                        let distanceScore = 100;
-                        if (avgDistance <= 5) distanceScore = 100;
-                        else if (avgDistance <= 10) distanceScore = 90;
-                        else if (avgDistance <= 20) distanceScore = 80;
-                        else if (avgDistance <= 50) distanceScore = 60;
-                        else if (avgDistance <= 100) distanceScore = 40;
-                        else distanceScore = Math.max(0, 100 - avgDistance);
+                        // 5. 采样频率
+                        let observedSampleRateHz = null;
+                        let declaredSampleRateHz = null;
+                        if (allTrackPoints.length >= 2) {
+                            const sortedTrackPoints = [...allTrackPoints].sort((a, b) => a.timestamp - b.timestamp);
+                            const dtList = [];
+                            for (let i = 1; i < sortedTrackPoints.length; i++) {
+                                dtList.push(sortedTrackPoints[i].timestamp - sortedTrackPoints[i-1].timestamp);
+                            }
+                            dtList.sort((a, b) => a - b);
+                            const medianDtMs = dtList[Math.floor(dtList.length / 2)];
+                            observedSampleRateHz = 1000 / medianDtMs;
+                        }
+                        // 检查声明的采样频率
+                        if (selectedTracksData.length > 0 && selectedTracksData[0].trajectoryInfo) {
+                            declaredSampleRateHz = selectedTracksData[0].trajectoryInfo.sampleRateHz;
+                        }
                         
-                        let heightScore = 100;
-                        if (avgHeightDiff <= 5) heightScore = 100;
-                        else if (avgHeightDiff <= 10) heightScore = 90;
-                        else if (avgHeightDiff <= 30) heightScore = 80;
-                        else if (avgHeightDiff <= 50) heightScore = 60;
-                        else if (avgHeightDiff <= 100) heightScore = 40;
-                        else heightScore = Math.max(0, 100 - avgHeightDiff * 0.5);
+                        // 6. 丢包判定
+                        let packetLossCount = 0;
+                        const packetLossGapFactor = 1.5;
+                        if (allTrackPoints.length >= 2) {
+                            const sortedTrackPoints = [...allTrackPoints].sort((a, b) => a.timestamp - b.timestamp);
+                            let expectedPeriodMs = 1000 / observedSampleRateHz;
+                            if (declaredSampleRateHz) {
+                                expectedPeriodMs = 1000 / declaredSampleRateHz;
+                            }
+                            for (let i = 1; i < sortedTrackPoints.length; i++) {
+                                const dt = sortedTrackPoints[i].timestamp - sortedTrackPoints[i-1].timestamp;
+                                if (dt > expectedPeriodMs * packetLossGapFactor) {
+                                    packetLossCount++;
+                                }
+                            }
+                        }
                         
-                        const coverageScore = validMatches.length > 0 ? Math.min(100, (validMatches.length / (groundTruthTracks.value.reduce((sum, t) => sum + t.points.length, 0) || 1)) * 100) : 0;
+                        // 7. 跳变判定
+                        let jumpCount = 0;
+                        const jumpSpeedThresholdMps = 41.7; // 基线值
+                        if (allTrackPoints.length >= 2) {
+                            const sortedTrackPoints = [...allTrackPoints].sort((a, b) => a.timestamp - b.timestamp);
+                            for (let i = 1; i < sortedTrackPoints.length; i++) {
+                                const p1 = sortedTrackPoints[i-1];
+                                const p2 = sortedTrackPoints[i];
+                                const dtS = (p2.timestamp - p1.timestamp) / 1000;
+                                if (dtS <= 0) continue;
+                                const dh = calculateDistance(p1.latitude, p1.longitude, p2.latitude, p2.longitude);
+                                const dz = Math.abs((p1.height || 0) - (p2.height || 0));
+                                const distance3d = Math.sqrt(dh * dh + dz * dz);
+                                const apparentSpeed = distance3d / dtS;
+                                if (apparentSpeed > jumpSpeedThresholdMps) {
+                                    jumpCount++;
+                                }
+                            }
+                        }
+                        
+                        // 8. 轨迹平滑度
+                        let smoothnessScore = null;
+                        if (allTrackPoints.length >= 3) {
+                            const sortedTrackPoints = [...allTrackPoints].sort((a, b) => a.timestamp - b.timestamp);
+                            const accelerations = [];
+                            for (let i = 1; i < sortedTrackPoints.length - 1; i++) {
+                                const p0 = sortedTrackPoints[i-1];
+                                const p1 = sortedTrackPoints[i];
+                                const p2 = sortedTrackPoints[i+1];
+                                const dt1 = (p1.timestamp - p0.timestamp) / 1000;
+                                const dt2 = (p2.timestamp - p1.timestamp) / 1000;
+                                if (dt1 <= 0 || dt2 <= 0) continue;
+                                
+                                // 使用实际距离计算速度（米/秒）
+                                const dist1 = calculateDistance(p0.latitude, p0.longitude, p1.latitude, p1.longitude);
+                                const dist2 = calculateDistance(p1.latitude, p1.longitude, p2.latitude, p2.longitude);
+                                
+                                // 计算方向角（弧度）
+                                const bearing1 = calculateBearing(p0.latitude, p0.longitude, p1.latitude, p1.longitude);
+                                const bearing2 = calculateBearing(p1.latitude, p1.longitude, p2.latitude, p2.longitude);
+                                
+                                // 分解速度为x,y分量（东向为x正，北向为y正）
+                                const vx1 = dist1 * Math.sin(bearing1) / dt1;
+                                const vy1 = dist1 * Math.cos(bearing1) / dt1;
+                                const vx2 = dist2 * Math.sin(bearing2) / dt2;
+                                const vy2 = dist2 * Math.cos(bearing2) / dt2;
+                                
+                                // 计算加速度
+                                const ax = (vx2 - vx1) / ((dt1 + dt2) / 2);
+                                const ay = (vy2 - vy1) / ((dt1 + dt2) / 2);
+                                accelerations.push(Math.sqrt(ax * ax + ay * ay));
+                            }
+                            if (accelerations.length > 0) {
+                                const rmsAcc = Math.sqrt(accelerations.reduce((sum, a) => sum + a * a, 0) / accelerations.length);
+                                smoothnessScore = 1 / (1 + rmsAcc);
+                            }
+                        }
+                        
+                        // === 评分计算（每项10分）===
+                        
+                        // 1. 3D定位误差评分
+                        let positionScore = 0;
+                        if (avgPositionError <= 10) positionScore = 10;
+                        else if (avgPositionError <= 20) positionScore = 8;
+                        else if (avgPositionError <= 50) positionScore = 6;
+                        else if (avgPositionError <= 100) positionScore = 4;
+                        else if (avgPositionError <= 200) positionScore = 2;
+                        else positionScore = 0;
+                        
+                        // 2. 虚警率评分
+                        let falseAlarmScore = 0;
+                        if (falseAlarmRate <= 0.05) falseAlarmScore = 10;
+                        else if (falseAlarmRate <= 0.1) falseAlarmScore = 8;
+                        else if (falseAlarmRate <= 0.2) falseAlarmScore = 6;
+                        else if (falseAlarmRate <= 0.3) falseAlarmScore = 4;
+                        else if (falseAlarmRate <= 0.5) falseAlarmScore = 2;
+                        else falseAlarmScore = 0;
+                        
+                        // 3. 漏检率评分
+                        let missScore = 0;
+                        if (missRate <= 0.05) missScore = 10;
+                        else if (missRate <= 0.1) missScore = 8;
+                        else if (missRate <= 0.2) missScore = 6;
+                        else if (missRate <= 0.3) missScore = 4;
+                        else if (missRate <= 0.5) missScore = 2;
+                        else missScore = 0;
+                        
+                        // 4. 时间误差评分（暂时留空）
+                        let timeErrorScore = 0;
+                        
+                        // 5. 速度误差评分
+                        let speedScore = 0;
+                        if (speedErrors.length > 0) {
+                            if (avgSpeedError <= 5) speedScore = 10;
+                            else if (avgSpeedError <= 10) speedScore = 8;
+                            else if (avgSpeedError <= 20) speedScore = 6;
+                            else if (avgSpeedError <= 30) speedScore = 4;
+                            else if (avgSpeedError <= 50) speedScore = 2;
+                            else speedScore = 0;
+                        } else {
+                            speedScore = 0; // 缺少数据
+                        }
+                        
+                        // 6. 采样频率评分
+                        let sampleRateScore = 0;
+                        if (observedSampleRateHz !== null) {
+                            // 检查采样频率稳定性（变异系数）
+                            if (allTrackPoints.length >= 2) {
+                                const sortedTrackPoints = [...allTrackPoints].sort((a, b) => a.timestamp - b.timestamp);
+                                const dtList = [];
+                                for (let i = 1; i < sortedTrackPoints.length; i++) {
+                                    dtList.push(sortedTrackPoints[i].timestamp - sortedTrackPoints[i-1].timestamp);
+                                }
+                                const meanDt = dtList.reduce((sum, d) => sum + d, 0) / dtList.length;
+                                const stdDt = Math.sqrt(dtList.reduce((sum, d) => sum + Math.pow(d - meanDt, 2), 0) / dtList.length);
+                                const cv = stdDt / meanDt;
+                                if (cv <= 0.1) sampleRateScore = 10;
+                                else if (cv <= 0.2) sampleRateScore = 8;
+                                else if (cv <= 0.3) sampleRateScore = 6;
+                                else if (cv <= 0.5) sampleRateScore = 4;
+                                else sampleRateScore = 2;
+                            }
+                        }
+                        
+                        // 7. 丢包评分
+                        let packetLossScore = 0;
+                        const totalPossibleGaps = Math.max(0, allTrackPoints.length - 1);
+                        if (totalPossibleGaps > 0) {
+                            const lossRate = packetLossCount / totalPossibleGaps;
+                            if (lossRate <= 0.05) packetLossScore = 10;
+                            else if (lossRate <= 0.1) packetLossScore = 8;
+                            else if (lossRate <= 0.2) packetLossScore = 6;
+                            else if (lossRate <= 0.3) packetLossScore = 4;
+                            else if (lossRate <= 0.5) packetLossScore = 2;
+                            else packetLossScore = 0;
+                        } else {
+                            packetLossScore = 10; // 无数据或数据不足，视为满分
+                        }
+                        
+                        // 8. 跳变评分
+                        let jumpScore = 0;
+                        if (allTrackPoints.length >= 2) {
+                            const totalPossibleJumps = allTrackPoints.length - 1;
+                            const jumpRate = jumpCount / totalPossibleJumps;
+                            if (jumpRate <= 0.01) jumpScore = 10;
+                            else if (jumpRate <= 0.05) jumpScore = 8;
+                            else if (jumpRate <= 0.1) jumpScore = 6;
+                            else if (jumpRate <= 0.2) jumpScore = 4;
+                            else jumpScore = 2;
+                        } else {
+                            jumpScore = 10; // 无数据或数据不足，视为满分
+                        }
+                        
+                        // 9. 轨迹平滑度评分
+                        let smoothnessScoreFinal = 0;
+                        if (smoothnessScore !== null) {
+                            if (smoothnessScore >= 0.9) smoothnessScoreFinal = 10;
+                            else if (smoothnessScore >= 0.7) smoothnessScoreFinal = 8;
+                            else if (smoothnessScore >= 0.5) smoothnessScoreFinal = 6;
+                            else if (smoothnessScore >= 0.3) smoothnessScoreFinal = 4;
+                            else smoothnessScoreFinal = 2;
+                        }
                         
                         const warnings = detectMissingFields(selectedTracksData);
+                        
+                        // 检查缺少的数据字段
+                        if (speedErrors.length === 0 && validMatches.length > 0) {
+                            warnings.push('缺少速度数据(GS字段)，速度误差指标记0分');
+                        }
+                        if (declaredSampleRateHz === undefined) {
+                            warnings.push('缺少声明的采样频率(trajectoryInfo.sampleRateHz)，仅使用观测值');
+                        }
                         
                         // 时间偏移信息
                         let timeOffsetInfo = '';
@@ -1496,44 +1772,74 @@
                             timeOffsetInfo = `自动检测时间偏移: ${detectedOffset.offset}ms (基于${detectedOffset.sampleCount}个样本，置信度${detectedOffset.confidence.toFixed(1)}%)`;
                         } else {
                             timeOffsetInfo = '无法自动检测时间偏移，请手动设置';
-                            if (matchedCount === 0) {
-                                warnings.push('无法自动检测时间偏移，请手动设置时间偏移量');
-                            }
-                        }
-                        
-                        const unmatchedCount = totalPointsCount - matchedCount;
-                        if (unmatchedCount > 0 && matchedCount > 0) {
-                            warnings.push(`有 ${unmatchedCount} 个选中轨迹点无法在真值轨迹中找到匹配 (匹配窗口: 2000ms)`);
                         }
                         
                         const metrics = [
                             {
-                                name: '点位匹配率',
-                                score: matchScore,
-                                level: matchScore >= 80 ? 'excellent' : matchScore >= 50 ? 'good' : 'poor',
-                                description: `匹配 ${matchedCount}/${totalPointsCount} 个点位`
+                                name: '3D定位误差',
+                                score: positionScore,
+                                level: positionScore >= 8 ? 'excellent' : positionScore >= 6 ? 'good' : 'poor',
+                                description: `平均误差 ${avgPositionError.toFixed(2)}m，最大误差 ${maxPositionError.toFixed(2)}m`
                             },
                             {
-                                name: '水平距离精度',
-                                score: distanceScore,
-                                level: distanceScore >= 80 ? 'excellent' : distanceScore >= 50 ? 'good' : 'poor',
-                                description: `平均误差 ${avgDistance.toFixed(2)}m，最大误差 ${maxDistance.toFixed(2)}m`
+                                name: '虚警率',
+                                score: falseAlarmScore,
+                                level: falseAlarmScore >= 8 ? 'excellent' : falseAlarmScore >= 6 ? 'good' : 'poor',
+                                description: `虚警率 ${(falseAlarmRate * 100).toFixed(1)}% (${falseAlarmCount}/${allTrackPoints.length})`
                             },
                             {
-                                name: '高度精度',
-                                score: heightScore,
-                                level: heightScore >= 80 ? 'excellent' : heightScore >= 50 ? 'good' : 'poor',
-                                description: `平均误差 ${avgHeightDiff.toFixed(2)}m`
+                                name: '漏检率',
+                                score: missScore,
+                                level: missScore >= 8 ? 'excellent' : missScore >= 6 ? 'good' : 'poor',
+                                description: `漏检率 ${(missRate * 100).toFixed(1)}% (${missCount}/${sortedGtPoints.length})`
                             },
                             {
-                                name: '轨迹覆盖率',
-                                score: coverageScore,
-                                level: coverageScore >= 80 ? 'excellent' : coverageScore >= 50 ? 'good' : 'poor',
-                                description: `覆盖真值轨迹的 ${coverageScore.toFixed(1)}%`
+                                name: '时间误差',
+                                score: timeErrorScore,
+                                level: 'poor',
+                                description: '缺少数据，暂时留空'
+                            },
+                            {
+                                name: '速度误差',
+                                score: speedScore,
+                                level: speedScore >= 8 ? 'excellent' : speedScore >= 6 ? 'good' : 'poor',
+                                description: avgSpeedError !== null ? `平均误差 ${avgSpeedError.toFixed(2)} m/s` : '缺少GS字段数据'
+                            },
+                            {
+                                name: '采样频率',
+                                score: sampleRateScore,
+                                level: sampleRateScore >= 8 ? 'excellent' : sampleRateScore >= 6 ? 'good' : 'poor',
+                                description: observedSampleRateHz !== null 
+                                    ? `观测值 ${observedSampleRateHz.toFixed(2)} Hz${declaredSampleRateHz ? `，声明值 ${declaredSampleRateHz} Hz` : ''}`
+                                    : '数据不足'
+                            },
+                            {
+                                name: '丢包判定',
+                                score: packetLossScore,
+                                level: packetLossScore >= 8 ? 'excellent' : packetLossScore >= 6 ? 'good' : 'poor',
+                                description: totalPossibleGaps > 0 
+                                    ? `丢包次数 ${packetLossCount}/${totalPossibleGaps}`
+                                    : '数据不足'
+                            },
+                            {
+                                name: '跳变判定',
+                                score: jumpScore,
+                                level: jumpScore >= 8 ? 'excellent' : jumpScore >= 6 ? 'good' : 'poor',
+                                description: allTrackPoints.length >= 2
+                                    ? `跳变次数 ${jumpCount}/${allTrackPoints.length - 1}`
+                                    : '数据不足'
+                            },
+                            {
+                                name: '轨迹平滑度',
+                                score: smoothnessScoreFinal,
+                                level: smoothnessScoreFinal >= 8 ? 'excellent' : smoothnessScoreFinal >= 6 ? 'good' : 'poor',
+                                description: smoothnessScore !== null 
+                                    ? `平滑度分数 ${smoothnessScore.toFixed(4)}`
+                                    : '数据不足'
                             }
                         ];
                         
-                        const totalScore = (matchScore * 0.3 + distanceScore * 0.3 + heightScore * 0.2 + coverageScore * 0.2);
+                        const totalScore = positionScore + falseAlarmScore + missScore + timeErrorScore + speedScore + sampleRateScore + packetLossScore + jumpScore + smoothnessScoreFinal;
                         
                         scoreResult.value = {
                             totalScore,
@@ -1552,7 +1858,7 @@
                     tracks, groundTruthTracks, groundTruthLoaded, selectedTracks, filterText, filteredTracks, isAllSelected, totalPoints, sensorInfo, 
                     handleFileUpload, handleCSVUpload, toggleTrack, selectAll, deselectAll, toggleSelectAll, focusTrack,
                     isLoading, loadingText, loadingSubtext,
-                    timeOffset, timeWindow, scoreResult, canScore, calculateScore
+                    timeOffset, timeToleranceMs, distanceToleranceM, groundTruthNeighborhoodM, scoreResult, canScore, calculateScore
                 };
             }
         }).mount('#app');
