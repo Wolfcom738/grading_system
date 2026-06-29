@@ -239,6 +239,15 @@
             color: #94a3b8;
         }
         
+        .time-offset-info {
+            font-size: 11px;
+            color: #94a3b8;
+            background: rgba(56, 189, 248, 0.1);
+            padding: 6px 10px;
+            border-radius: 4px;
+            margin-bottom: 12px;
+        }
+        
         .metric-item {
             margin-bottom: 10px;
             padding-bottom: 10px;
@@ -250,6 +259,7 @@
             margin-bottom: 0;
             padding-bottom: 0;
         }
+        
         
         .metric-name {
             font-size: 12px;
@@ -431,6 +441,10 @@
                         <span class="score-label">综合评分</span>
                     </div>
                     
+                    <div v-if="scoreResult.timeOffsetInfo" class="time-offset-info">
+                        {{ scoreResult.timeOffsetInfo }}
+                    </div>
+                    
                     <div v-for="metric in scoreResult.metrics" :key="metric.name" class="metric-item">
                         <div class="metric-name">{{ metric.name }}</div>
                         <div class="metric-bar-container">
@@ -457,6 +471,7 @@
             setup() {
                 const tracks = ref([]);
                 const groundTruthTracks = ref([]);
+                const groundTruthLoaded = ref(false);
                 const selectedTracks = ref([]);
                 const filterText = ref('');
                 const map = ref(null);
@@ -565,11 +580,133 @@
                     event.target.value = '';
                 };
                 
+                const parseCSVLine = (line) => {
+                    const values = [];
+                    let start = 0;
+                    let inQuotes = false;
+                    const len = line.length;
+                    
+                    for (let i = 0; i <= len; i++) {
+                        if (i === len || (line[i] === ',' && !inQuotes)) {
+                            let val = line.substring(start, i);
+                            if (val.length >= 2 && val[0] === '"' && val[val.length - 1] === '"') {
+                                val = val.substring(1, val.length - 1);
+                            }
+                            values.push(val.trim());
+                            start = i + 1;
+                        } else if (line[i] === '"') {
+                            inQuotes = !inQuotes;
+                        }
+                    }
+                    return values;
+                };
+                
+                const parseISODate = (dateStr) => {
+                    const len = dateStr.length;
+                    if (len < 19) return new Date(dateStr).getTime();
+                    
+                    const year = (dateStr.charCodeAt(0) - 48) * 1000 + (dateStr.charCodeAt(1) - 48) * 100 + 
+                                (dateStr.charCodeAt(2) - 48) * 10 + (dateStr.charCodeAt(3) - 48);
+                    const month = ((dateStr.charCodeAt(5) - 48) * 10 + (dateStr.charCodeAt(6) - 48)) - 1;
+                    const day = (dateStr.charCodeAt(8) - 48) * 10 + (dateStr.charCodeAt(9) - 48);
+                    const hour = (dateStr.charCodeAt(11) - 48) * 10 + (dateStr.charCodeAt(12) - 48);
+                    const minute = (dateStr.charCodeAt(14) - 48) * 10 + (dateStr.charCodeAt(15) - 48);
+                    const second = (dateStr.charCodeAt(17) - 48) * 10 + (dateStr.charCodeAt(18) - 48);
+                    
+                    let ms = 0;
+                    if (len > 20 && dateStr[19] === '.') {
+                        for (let i = 20; i < Math.min(len, 23); i++) {
+                            ms = ms * 10 + (dateStr.charCodeAt(i) - 48);
+                        }
+                    }
+                    
+                    return new Date(Date.UTC(year, month, day, hour, minute, second, ms)).getTime();
+                };
+                
                 const handleCSVUpload = (event) => {
                     const files = event.target.files;
                     if (files.length === 0) return;
                     
                     setLoading(true, '解析 CSV 文件...', '正在处理真值数据，请稍候');
+                    
+                    groundTruthTracks.value = [];
+                    
+                    const parseFile = (file, callback) => {
+                        const reader = new FileReader();
+                        reader.onload = (e) => {
+                            try {
+                                const csvText = e.target.result;
+                                const lines = csvText.split('\n');
+                                if (lines.length < 2) {
+                                    callback();
+                                    return;
+                                }
+                                
+                                const headers = parseCSVLine(lines[0]);
+                                const latIndex = headers.indexOf('latitude');
+                                const lonIndex = headers.indexOf('longitude');
+                                const datetimeIndex = headers.indexOf('datetime(utc)');
+                                const altIndex = headers.indexOf('altitude_above_seaLevel(feet)');
+                                
+                                if (latIndex === -1 || lonIndex === -1) {
+                                    alert('CSV 文件格式错误：缺少 latitude 或 longitude 列');
+                                    callback();
+                                    return;
+                                }
+                                
+                                const points = [];
+                                const parseFn = parseFloat;
+                                const hasDateTime = datetimeIndex !== -1;
+                                
+                                for (let i = 1; i < lines.length; i++) {
+                                    const line = lines[i];
+                                    if (!line || line[0] === '#') continue;
+                                    
+                                    const values = parseCSVLine(line);
+                                    if (values.length <= lonIndex) continue;
+                                    
+                                    const lat = parseFn(values[latIndex]);
+                                    const lon = parseFn(values[lonIndex]);
+                                    
+                                    if (isNaN(lat) || isNaN(lon)) continue;
+                                    
+                                    let timestamp = 0;
+                                    if (hasDateTime && values[datetimeIndex]) {
+                                        timestamp = parseISODate(values[datetimeIndex]);
+                                    }
+                                    
+                                    let altitude = 0;
+                                    if (altIndex !== -1 && values[altIndex]) {
+                                        altitude = parseFn(values[altIndex]) * 0.3048;
+                                    }
+                                    
+                                    points.push({
+                                        latitude: lat,
+                                        longitude: lon,
+                                        timestamp: timestamp,
+                                        datetime: hasDateTime ? values[datetimeIndex] : '',
+                                        altitude: altitude
+                                    });
+                                }
+                                
+                                if (points.length > 0) {
+                                    groundTruthTracks.value.push({
+                                        trackID: `GT-${file.name}`,
+                                        objectID: file.name,
+                                        flightStage: 'GroundTruth',
+                                        points: points,
+                                        color: '#22c55e'
+                                    });
+                                }
+                                
+                                callback();
+                            } catch (err) {
+                                alert(`文件 ${file.name} 解析失败: ${err.message}`);
+                                callback();
+                            }
+                        };
+                        reader.readAsText(file);
+                    };
                     
                     let processed = 0;
                     const totalFiles = files.length;
@@ -577,55 +714,59 @@
                     const completeProcessing = () => {
                         processed++;
                         if (processed === totalFiles) {
+                            groundTruthLoaded.value = true;
+                            updateMap();
                             setLoading(false);
                         }
                     };
                     
                     for (const file of files) {
-                        const reader = new FileReader();
-                        reader.onload = (e) => {
-                            try { 
-                                processCSVData(e.target.result, file.name, completeProcessing); 
-                            } catch (err) { 
-                                alert(`文件 ${file.name} 解析失败: ${err.message}`); 
-                                completeProcessing();
-                            }
-                        };
-                        reader.readAsText(file);
+                        parseFile(file, completeProcessing);
                     }
+                    
                     event.target.value = '';
                 };
                 
                 const processData = (data) => {
-                    // 清空旧数据
                     tracks.value = [];
                     selectedTracks.value = [];
                     
-                    // 处理数组格式的数据源
                     const uploadItems = Array.isArray(data) ? data : [data];
                     
-                    uploadItems.forEach(uploadItem => {
-                        if (!uploadItem.data || !Array.isArray(uploadItem.data)) return;
-                        uploadItem.data.forEach(item => {
-                            if (item.sensor) {
-                                const s = item.sensor;
-                                sensorInfo.value = {
-                                    manufacturerID: s.sensorManufacturerID || '',
-                                    sn: s.sensorSN || '',
-                                    operator: s.sensorOperatorInfo?.entityName || '',
-                                    location: s.sensorLocation ? `${s.sensorLocation.latitude?.toFixed(4)}, ${s.sensorLocation.longitude?.toFixed(4)}` : '',
-                                    category: s.sensorExtra?.sensorCategory || ''
-                                };
-                                if (s.sensorLocation) updateSensorMarker(s.sensorLocation.latitude, s.sensorLocation.longitude, s);
-                            }
-                            if (item.perceivedStatus && Array.isArray(item.perceivedStatus)) {
-                                item.perceivedStatus.forEach(status => processTrack(status, item.CRS));
-                            }
+                    try {
+                        uploadItems.forEach(uploadItem => {
+                            if (!uploadItem.data || !Array.isArray(uploadItem.data)) return;
+                            uploadItem.data.forEach(item => {
+                                if (item.sensor) {
+                                    const s = item.sensor;
+                                    sensorInfo.value = {
+                                        manufacturerID: s.sensorManufacturerID || '',
+                                        sn: s.sensorSN || '',
+                                        operator: s.sensorOperatorInfo?.entityName || '',
+                                        location: s.sensorLocation ? `${s.sensorLocation.latitude?.toFixed(4)}, ${s.sensorLocation.longitude?.toFixed(4)}` : '',
+                                        category: s.sensorExtra?.sensorCategory || ''
+                                    };
+                                    if (s.sensorLocation) updateSensorMarker(s.sensorLocation.latitude, s.sensorLocation.longitude, s);
+                                }
+                                if (item.perceivedStatus && Array.isArray(item.perceivedStatus)) {
+                                    item.perceivedStatus.forEach(status => processTrack(status, item.CRS));
+                                }
+                            });
                         });
-                    });
-                    
-                    tracks.value.forEach(t => { if (!selectedTracks.value.includes(t.trackID)) selectedTracks.value.push(t.trackID); });
-                    updateMap();
+                        
+                        tracks.value.forEach(t => { if (!selectedTracks.value.includes(t.trackID)) selectedTracks.value.push(t.trackID); });
+                        
+                        setTimeout(() => {
+                            try {
+                                updateMap();
+                            } catch (mapErr) {
+                                console.error('地图更新失败:', mapErr);
+                            }
+                        }, 100);
+                    } catch (err) {
+                        console.error('数据处理失败:', err);
+                        alert(`数据处理失败: ${err.message}`);
+                    }
                 };
                 
                 const processTrack = (status, crs) => {
@@ -667,157 +808,6 @@
                     existingTrack.points.sort((a, b) => a.timestamp - b.timestamp);
                 };
                 
-                const processCSVData = (csvText, fileName, onComplete) => {
-                    // 使用Web Worker处理CSV解析，避免阻塞主线程
-                    const worker = new Worker(URL.createObjectURL(new Blob([`
-                        self.onmessage = function(e) {
-                            const csvText = e.data.csvText;
-                            const fileName = e.data.fileName;
-                            const lines = csvText.trim().split('\\n');
-                            if (lines.length < 2) {
-                                self.postMessage({ success: false, error: 'CSV文件为空' });
-                                return;
-                            }
-                            
-                            const headers = lines[0].split(',').map(function(h) { return h.trim(); });
-                            var latIndex = -1, lonIndex = -1, timeIndex = -1, datetimeIndex = -1, altIndex = -1;
-                            for (var i = 0; i < headers.length; i++) {
-                                if (headers[i] === 'latitude') latIndex = i;
-                                else if (headers[i] === 'longitude') lonIndex = i;
-                                else if (headers[i] === 'time(millisecond)') timeIndex = i;
-                                else if (headers[i] === 'datetime(utc)') datetimeIndex = i;
-                                else if (headers[i] === 'altitude_above_seaLevel(feet)') altIndex = i;
-                            }
-                            
-                            if (latIndex === -1 || lonIndex === -1) {
-                                self.postMessage({ success: false, error: '缺少 latitude 或 longitude 列' });
-                                return;
-                            }
-                            
-                            const points = [];
-                            for (var i = 1; i < lines.length; i++) {
-                                const values = lines[i].split(',');
-                                if (values.length <= latIndex || values.length <= lonIndex) continue;
-                                
-                                const lat = parseFloat(values[latIndex]);
-                                const lon = parseFloat(values[lonIndex]);
-                                
-                                if (isNaN(lat) || isNaN(lon)) continue;
-                                
-                                var timestamp = 0;
-                                if (datetimeIndex !== -1 && values[datetimeIndex]) {
-                                    var date = new Date(values[datetimeIndex]);
-                                    timestamp = date.getTime();
-                                } else if (timeIndex !== -1) {
-                                    timestamp = parseInt(values[timeIndex]);
-                                }
-                                
-                                const point = {
-                                    latitude: lat,
-                                    longitude: lon,
-                                    timestamp: timestamp,
-                                    datetime: datetimeIndex !== -1 ? values[datetimeIndex] : '',
-                                    altitude: altIndex !== -1 ? parseFloat(values[altIndex]) : 0
-                                };
-                                points.push(point);
-                            }
-                            
-                            if (points.length > 0) {
-                                self.postMessage({ 
-                                    success: true, 
-                                    data: { 
-                                        trackID: 'GT-' + fileName,
-                                        objectID: fileName,
-                                        flightStage: 'GroundTruth',
-                                        points: points,
-                                        color: '#22c55e'
-                                    } 
-                                });
-                            } else {
-                                self.postMessage({ success: false, error: '没有有效的数据点' });
-                            }
-                        };
-                    `], { type: 'application/javascript' })));
-                    
-                    worker.onmessage = function(e) {
-                        worker.terminate();
-                        if (e.data.success) {
-                            groundTruthTracks.value = [e.data.data];
-                            updateMap();
-                        } else {
-                            alert('CSV解析错误: ' + e.data.error);
-                        }
-                        if (onComplete) onComplete();
-                    };
-                    
-                    worker.onerror = function(e) {
-                        worker.terminate();
-                        console.error('CSV解析Worker错误:', e);
-                        processCSVDataFallback(csvText, fileName);
-                        if (onComplete) onComplete();
-                    };
-                    
-                    worker.postMessage({ csvText, fileName });
-                };
-                
-                // 降级的同步解析方法
-                const processCSVDataFallback = (csvText, fileName) => {
-                    groundTruthTracks.value = [];
-                    
-                    const lines = csvText.trim().split('\n');
-                    if (lines.length < 2) return;
-                    
-                    const headers = lines[0].split(',').map(h => h.trim());
-                    const latIndex = headers.findIndex(h => h === 'latitude');
-                    const lonIndex = headers.findIndex(h => h === 'longitude');
-                    const timeIndex = headers.findIndex(h => h === 'time(millisecond)');
-                    const datetimeIndex = headers.findIndex(h => h === 'datetime(utc)');
-                    const altIndex = headers.findIndex(h => h === 'altitude_above_seaLevel(feet)');
-                    
-                    if (latIndex === -1 || lonIndex === -1) {
-                        alert('CSV 文件格式错误：缺少 latitude 或 longitude 列');
-                        return;
-                    }
-                    
-                    const points = [];
-                        for (let i = 1; i < lines.length; i++) {
-                            const values = lines[i].split(',');
-                            if (values.length <= latIndex || values.length <= lonIndex) continue;
-                            
-                            const lat = parseFloat(values[latIndex]);
-                            const lon = parseFloat(values[lonIndex]);
-                            
-                            if (isNaN(lat) || isNaN(lon)) continue;
-                            
-                            let timestamp = 0;
-                            if (datetimeIndex !== -1 && values[datetimeIndex]) {
-                                const date = new Date(values[datetimeIndex]);
-                                timestamp = date.getTime();
-                            } else if (timeIndex !== -1) {
-                                timestamp = parseInt(values[timeIndex]);
-                            }
-                            
-                            points.push({
-                                latitude: lat,
-                                longitude: lon,
-                                timestamp: timestamp,
-                                datetime: datetimeIndex !== -1 ? values[datetimeIndex] : '',
-                                altitude: altIndex !== -1 ? parseFloat(values[altIndex]) : 0
-                            });
-                        }
-                    
-                    if (points.length > 0) {
-                        groundTruthTracks.value.push({
-                            trackID: `GT-${fileName}`,
-                            objectID: fileName,
-                            flightStage: 'GroundTruth',
-                            points: points,
-                            color: '#22c55e'
-                        });
-                        updateMap();
-                    }
-                };
-                
                 const updateSensorMarker = (lat, lng, sensorData) => {
                     if (sensorMarker.value) map.value.removeLayer(sensorMarker.value);
                     const icon = L.divIcon({
@@ -841,21 +831,27 @@
                 };
                 
                 const updateMap = () => {
+                    if (!map.value) return;
+                    
                     // 清除旧的感知轨迹图层
                     Object.values(trackLayers.value).forEach(layer => {
-                        if (layer.polyline) map.value.removeLayer(layer.polyline);
-                        if (layer.startMarker) map.value.removeLayer(layer.startMarker);
-                        if (layer.endMarker) map.value.removeLayer(layer.endMarker);
-                        if (layer.pointMarkers) layer.pointMarkers.forEach(m => map.value.removeLayer(m));
+                        try {
+                            if (layer.polyline) map.value.removeLayer(layer.polyline);
+                            if (layer.startMarker) map.value.removeLayer(layer.startMarker);
+                            if (layer.endMarker) map.value.removeLayer(layer.endMarker);
+                            if (layer.pointMarkers) layer.pointMarkers.forEach(m => map.value.removeLayer(m));
+                        } catch (e) {}
                     });
                     trackLayers.value = {};
                     
                     // 清除旧的真值轨迹图层
                     Object.values(groundTruthLayers.value).forEach(layer => {
-                        if (layer.polyline) map.value.removeLayer(layer.polyline);
-                        if (layer.startMarker) map.value.removeLayer(layer.startMarker);
-                        if (layer.endMarker) map.value.removeLayer(layer.endMarker);
-                        if (layer.pointMarkers) layer.pointMarkers.forEach(m => map.value.removeLayer(m));
+                        try {
+                            if (layer.polyline) map.value.removeLayer(layer.polyline);
+                            if (layer.startMarker) map.value.removeLayer(layer.startMarker);
+                            if (layer.endMarker) map.value.removeLayer(layer.endMarker);
+                            if (layer.pointMarkers) layer.pointMarkers.forEach(m => map.value.removeLayer(m));
+                        } catch (e) {}
                     });
                     groundTruthLayers.value = {};
                     
@@ -890,7 +886,6 @@
                         const pointMarkers = [];
                         track.points.forEach((p, idx) => {
                             if (idx === 0 || idx === track.points.length - 1) return;
-                            // 使用 CircleMarker 确保缩放时位置稳定
                             const marker = L.circleMarker([p.latitude, p.longitude], { 
                                 radius: 4, 
                                 fillColor: color, 
@@ -936,7 +931,6 @@
                         const pointMarkers = [];
                         track.points.forEach((p, idx) => {
                             if (idx === 0 || idx === track.points.length - 1) return;
-                            // 使用 CircleMarker 确保缩放时位置稳定
                             const marker = L.circleMarker([p.latitude, p.longitude], { 
                                 radius: 4, 
                                 fillColor: color, 
@@ -1104,23 +1098,112 @@
                     return R * c;
                 };
                 
-                const findMatchingGroundTruthPoint = (trackPoint, groundTruthTracks) => {
-                    const targetTimestamp = trackPoint.timestamp + (parseInt(timeOffset.value) || 0);
-                    const windowSize = parseInt(timeWindow.value) || 500;
+                const detectTimeOffset = (trackPoints, groundTruthPoints) => {
+                    if (trackPoints.length === 0 || groundTruthPoints.length === 0) {
+                        return { offset: 0, confidence: 0, sampleCount: 0 };
+                    }
                     
+                    const validTrackPoints = trackPoints.filter(p => p.timestamp > 0);
+                    const validGtPoints = groundTruthPoints.filter(p => p.timestamp > 0);
+                    
+                    if (validTrackPoints.length === 0 || validGtPoints.length === 0) {
+                        console.warn('[时间偏移检测] 缺少有效的时间戳数据，使用默认0偏移');
+                        return { offset: 0, confidence: 70, sampleCount: 0 };
+                    }
+                    
+                    // 计算时间范围
+                    const trackTimes = validTrackPoints.map(p => p.timestamp);
+                    const gtTimes = validGtPoints.map(p => p.timestamp);
+                    const trackMin = Math.min(...trackTimes);
+                    const trackMax = Math.max(...trackTimes);
+                    const gtMin = Math.min(...gtTimes);
+                    const gtMax = Math.max(...gtTimes);
+                    
+                    const oneHour = 3600000;
+                    const eightHour = 28800000;
+                    
+                    console.log('[时间偏移检测] 轨迹时间范围:', new Date(trackMin).toISOString(), '~', new Date(trackMax).toISOString());
+                    console.log('[时间偏移检测] 真值时间范围:', new Date(gtMin).toISOString(), '~', new Date(gtMax).toISOString());
+                    
+                    // 检查时间范围是否重叠（考虑1小时缓冲）
+                    const hasDirectOverlap = (trackMin - oneHour) <= gtMax && (trackMax + oneHour) >= gtMin;
+                    
+                    if (hasDirectOverlap) {
+                        console.log('[时间偏移检测] 时间范围直接重叠，使用0偏移');
+                        return { offset: 0, confidence: 100, sampleCount: validTrackPoints.length };
+                    }
+                    
+                    // 检查 track-8h 是否与真值重叠
+                    const trackMinMinus8h = trackMin - eightHour;
+                    const trackMaxMinus8h = trackMax - eightHour;
+                    const hasMinus8hOverlap = (trackMinMinus8h - oneHour) <= gtMax && (trackMaxMinus8h + oneHour) >= gtMin;
+                    
+                    if (hasMinus8hOverlap) {
+                        console.log('[时间偏移检测] 轨迹-8h后与真值重叠，使用-8小时偏移');
+                        return { offset: -eightHour, confidence: 100, sampleCount: validTrackPoints.length };
+                    }
+                    
+                    // 检查 track+8h 是否与真值重叠
+                    const trackMinPlus8h = trackMin + eightHour;
+                    const trackMaxPlus8h = trackMax + eightHour;
+                    const hasPlus8hOverlap = (trackMinPlus8h - oneHour) <= gtMax && (trackMaxPlus8h + oneHour) >= gtMin;
+                    
+                    if (hasPlus8hOverlap) {
+                        console.log('[时间偏移检测] 轨迹+8h后与真值重叠，使用+8小时偏移');
+                        return { offset: eightHour, confidence: 100, sampleCount: validTrackPoints.length };
+                    }
+                    
+                    // 都不重叠，返回0偏移并警告
+                    console.warn('[时间偏移检测] 时间范围无重叠，使用0偏移。请检查时间戳或手动设置偏移');
+                    return { offset: 0, confidence: 30, sampleCount: validTrackPoints.length };
+                };
+                
+                const findMatchingGroundTruthPoint = (trackPoint, sortedGtPoints, timeOffset) => {
+                    const targetTimestamp = trackPoint.timestamp + timeOffset;
+                    const windowSize = 1000; // 1秒窗口（严格匹配）
+                    
+                    if (sortedGtPoints.length === 0) return null;
+                    
+                    // 使用二分查找找到时间窗口内的起始点
+                    let left = 0, right = sortedGtPoints.length - 1;
+                    let startIdx = 0;
+                    
+                    while (left <= right) {
+                        const mid = Math.floor((left + right) / 2);
+                        if (sortedGtPoints[mid].timestamp < targetTimestamp - windowSize) {
+                            startIdx = mid + 1;
+                            left = mid + 1;
+                        } else {
+                            right = mid - 1;
+                        }
+                    }
+                    
+                    // 从startIdx开始收集所有在时间窗口内的点
+                    const candidates = [];
+                    for (let i = startIdx; i < sortedGtPoints.length; i++) {
+                        const gp = sortedGtPoints[i];
+                        if (gp.timestamp > targetTimestamp + windowSize) break;
+                        candidates.push(gp);
+                    }
+                    
+                    if (candidates.length === 0) return null;
+                    if (candidates.length === 1) return candidates[0];
+                    
+                    // 选择距离最近的点
                     let bestMatch = null;
-                    let minTimeDiff = Infinity;
+                    let minDistance = Infinity;
                     
-                    groundTruthTracks.forEach(gtTrack => {
-                        gtTrack.points.forEach(gtPoint => {
-                            const gtTimestamp = gtPoint.timestamp;
-                            const timeDiff = Math.abs(gtTimestamp - targetTimestamp);
-                            
-                            if (timeDiff <= windowSize && timeDiff < minTimeDiff) {
-                                minTimeDiff = timeDiff;
-                                bestMatch = gtPoint;
-                            }
-                        });
+                    candidates.forEach(gp => {
+                        const dist = calculateDistance(
+                            trackPoint.latitude, 
+                            trackPoint.longitude, 
+                            gp.latitude, 
+                            gp.longitude
+                        );
+                        if (dist < minDistance) {
+                            minDistance = dist;
+                            bestMatch = gp;
+                        }
                     });
                     
                     return bestMatch;
@@ -1128,7 +1211,7 @@
                 
                 const detectMissingFields = (tracks) => {
                     const warnings = [];
-                    const requiredFields = ['trackID', 'objectID', 'sampleTime', 'objectPosition'];
+                    const requiredFields = ['trackID', 'objectID'];
                     
                     tracks.forEach((track, trackIndex) => {
                         requiredFields.forEach(field => {
@@ -1137,33 +1220,15 @@
                             }
                         });
                         
-                        if (track.objectPosition && track.objectPosition.length > 0) {
-                            const pos = track.objectPosition[0];
-                            if (pos.positionBase === 'Ground') {
-                                if (pos.longitude === undefined || pos.longitude === null) {
-                                    warnings.push(`轨迹 ${track.trackID}: 缺少经度(longitude)`);
-                                }
-                                if (pos.latitude === undefined || pos.latitude === null) {
-                                    warnings.push(`轨迹 ${track.trackID}: 缺少纬度(latitude)`);
-                                }
-                                if (pos.height === undefined || pos.height === null) {
-                                    warnings.push(`轨迹 ${track.trackID}: 缺少高度(height)`);
-                                }
+                        // 检查轨迹点数据（在 track.points 中）
+                        if (!track.points || track.points.length === 0) {
+                            warnings.push(`轨迹 ${track.trackID || '#' + trackIndex}: 缺少轨迹点数据(points)`);
+                        } else {
+                            // 检查轨迹点是否有必要的字段
+                            const hasLatLng = track.points.some(p => p.latitude && p.longitude);
+                            if (!hasLatLng) {
+                                warnings.push(`轨迹 ${track.trackID}: 轨迹点缺少经纬度数据`);
                             }
-                        }
-                        
-                        if (track.objectVelocity && track.objectVelocity.length > 0) {
-                            const vel = track.objectVelocity[0];
-                            if (vel.GS === undefined || vel.GS === null) {
-                                warnings.push(`轨迹 ${track.trackID}: 缺少地速(GS)`);
-                            }
-                            if (vel.VS === undefined || vel.VS === null) {
-                                warnings.push(`轨迹 ${track.trackID}: 缺少垂直速度(VS)`);
-                            }
-                        }
-                        
-                        if (!track.objectStatusExtra?.trajectoryPoints || track.objectStatusExtra.trajectoryPoints.length === 0) {
-                            warnings.push(`轨迹 ${track.trackID}: 缺少轨迹点数据(trajectoryPoints)`);
                         }
                     });
                     
@@ -1173,12 +1238,36 @@
                 const calculateScore = () => {
                     if (!canScore.value) return;
                     
+                    // 检查是否已选择轨迹
+                    if (selectedTracks.value.length === 0) {
+                        setLoading(false);
+                        alert('请先在左侧列表中选择需要评分的轨迹');
+                        return;
+                    }
+                    
                     setLoading(true, '评分计算中...', '正在对齐数据并计算指标');
                     
                     setTimeout(() => {
+                        // 只处理用户选中的轨迹
+                        const selectedTrackIDs = selectedTracks.value;
+                        console.log('[评分调试] 选中的轨迹:', selectedTrackIDs);
+                        
                         const allTrackPoints = [];
+                        const selectedTracksData = tracks.value.filter(t => selectedTrackIDs.includes(t.trackID));
                         tracks.value.forEach(track => {
-                            if (track.objectStatusExtra?.trajectoryPoints) {
+                            // 只处理选中的轨迹
+                            if (!selectedTrackIDs.includes(track.trackID)) return;
+                            
+                            // 优先从 track.points 获取（这是 processTrack 存储的）
+                            if (track.points && track.points.length > 0) {
+                                track.points.forEach(p => {
+                                    allTrackPoints.push({
+                                        ...p,
+                                        trackID: track.trackID,
+                                        objectID: track.objectID
+                                    });
+                                });
+                            } else if (track.objectStatusExtra?.trajectoryPoints) {
                                 track.objectStatusExtra.trajectoryPoints.forEach(p => {
                                     allTrackPoints.push({
                                         ...p,
@@ -1189,15 +1278,112 @@
                             }
                         });
                         
+                        // 获取所有真值轨迹点
+                        const allGtPoints = groundTruthTracks.value.flatMap(t => t.points);
+                        
+                        console.log('[评分调试] 选中轨迹点数量:', allTrackPoints.length);
+                        console.log('[评分调试] 真值点数量:', allGtPoints.length);
+                        
+                        if (allTrackPoints.length > 0) {
+                            console.log('[评分调试] 轨迹点时间戳示例:', 
+                                allTrackPoints.slice(0, 3).map(p => ({ ts: p.timestamp, date: new Date(p.timestamp).toISOString() })));
+                        }
+                        if (allGtPoints.length > 0) {
+                            console.log('[评分调试] 真值点时间戳示例:', 
+                                allGtPoints.slice(0, 3).map(p => ({ ts: p.timestamp, date: new Date(p.timestamp).toISOString() })));
+                        }
+                        
+                        // 自动检测时间偏移
+                        const userOffset = parseInt(timeOffset.value) || 0;
+                        
+                        // 计算时间范围
+                        const trackTimes = allTrackPoints.map(p => p.timestamp);
+                        const gtTimes = allGtPoints.map(p => p.timestamp);
+                        const trackMin = Math.min(...trackTimes);
+                        const trackMax = Math.max(...trackTimes);
+                        const gtMin = Math.min(...gtTimes);
+                        const gtMax = Math.max(...gtTimes);
+                        
+                        console.log('[评分调试] 轨迹时间范围:', new Date(trackMin).toISOString(), '~', new Date(trackMax).toISOString());
+                        console.log('[评分调试] 真值时间范围:', new Date(gtMin).toISOString(), '~', new Date(gtMax).toISOString());
+                        
+                        const detectedOffset = detectTimeOffset(allTrackPoints, allGtPoints);
+                        
+                        console.log('[评分调试] 检测到的偏移:', detectedOffset);
+                        console.log('[评分调试] 用户设置偏移:', userOffset);
+                        
+                        // 确定有效偏移
+                        let effectiveOffset = detectedOffset.offset;
+                        if (userOffset !== 0) {
+                            effectiveOffset = userOffset;
+                        } else {
+                            // 检查时间范围是否有重叠
+                            const trackRange = trackMax - trackMin;
+                            const gtRange = gtMax - gtMin;
+                            
+                            // 检查是否存在8小时差距
+                            const eightHourMs = 28800000;
+                            const diff1 = Math.abs((trackMin + eightHourMs) - gtMin);
+                            const diff2 = Math.abs((trackMin - eightHourMs) - gtMin);
+                            
+                            console.log('[评分调试] 原始时间差(起始):', trackMin - gtMin, `(${((trackMin - gtMin) / 3600000).toFixed(2)}小时)`);
+                            console.log('[评分调试] 原始时间差(中位数):', trackTimes[Math.floor(trackTimes.length / 2)] - gtTimes[Math.floor(gtTimes.length / 2)], `(${((trackTimes[Math.floor(trackTimes.length / 2)] - gtTimes[Math.floor(gtTimes.length / 2)]) / 3600000).toFixed(2)}小时)`);
+                            
+                            // 如果时间范围有重叠（考虑1小时的缓冲），使用检测到的偏移
+                            const hasOverlap = (trackMin - 3600000) <= gtMax && (trackMax + 3600000) >= gtMin;
+                            
+                            if (hasOverlap) {
+                                console.log('[评分调试] 时间范围有重叠，使用检测到的偏移');
+                                effectiveOffset = detectedOffset.offset;
+                            } else if (diff1 < 3600000) {
+                                console.log('[评分调试] 检测到约-8小时差距，使用-8小时偏移');
+                                effectiveOffset = -eightHourMs;
+                            } else if (diff2 < 3600000) {
+                                console.log('[评分调试] 检测到约+8小时差距，使用+8小时偏移');
+                                effectiveOffset = eightHourMs;
+                            } else {
+                                console.log('[评分调试] 时间范围无重叠且非8小时差距，使用检测到的偏移');
+                                effectiveOffset = detectedOffset.offset;
+                            }
+                        }
+                        
+                        console.log('[评分调试] 最终使用偏移:', effectiveOffset, `(${effectiveOffset / 3600000}小时)`);
+                        
+                        // 对真值点按时间戳排序，用于快速匹配
+                        const sortedGtPoints = [...allGtPoints].sort((a, b) => a.timestamp - b.timestamp);
+                        
+                        // 预匹配验证：打印3个样本的偏移后时间戳对比
+                        console.log('[评分调试] 预匹配验证（偏移后时间对比）:');
+                        for (let i = 0; i < Math.min(3, allTrackPoints.length); i++) {
+                            const tp = allTrackPoints[i];
+                            const targetTs = tp.timestamp + effectiveOffset;
+                            // 找到最近的真值点
+                            let nearestGt = sortedGtPoints[0];
+                            let minDiff = Infinity;
+                            for (const gp of sortedGtPoints) {
+                                const diff = Math.abs(gp.timestamp - targetTs);
+                                if (diff < minDiff) {
+                                    minDiff = diff;
+                                    nearestGt = gp;
+                                }
+                            }
+                            console.log(`  轨迹点 #${i+1}: ${new Date(tp.timestamp).toISOString()} -> 偏移后: ${new Date(targetTs).toISOString()}, 最近真值点: ${new Date(nearestGt.timestamp).toISOString()}, 时间差: ${minDiff}ms`);
+                        }
+                        
+                        // 匹配点（先不区分干扰目标）
                         const matchedPoints = [];
                         const unmatchedPoints = [];
                         
-                        allTrackPoints.forEach(trackPoint => {
-                            const gtPoint = findMatchingGroundTruthPoint(trackPoint, groundTruthTracks.value);
+                        allTrackPoints.forEach((trackPoint, trackIdx) => {
+                            const gtPoint = findMatchingGroundTruthPoint(trackPoint, sortedGtPoints, effectiveOffset);
                             if (gtPoint) {
+                                // 找到真值点在数组中的序号
+                                const gtIdx = sortedGtPoints.findIndex(p => p.timestamp === gtPoint.timestamp && p.latitude === gtPoint.latitude && p.longitude === gtPoint.longitude);
                                 matchedPoints.push({
                                     trackPoint,
+                                    trackIdx: trackIdx + 1,
                                     gtPoint,
+                                    gtIdx: gtIdx + 1,
                                     distance: calculateDistance(trackPoint.latitude, trackPoint.longitude, gtPoint.latitude, gtPoint.longitude),
                                     heightDiff: Math.abs((trackPoint.height || 0) - (gtPoint.altitude || 0))
                                 });
@@ -1206,20 +1392,78 @@
                             }
                         });
                         
+                        console.log('[评分调试] 匹配数量:', matchedPoints.length);
+                        console.log('[评分调试] 未匹配数量:', unmatchedPoints.length);
+                        console.log('[评分调试] 匹配率:', matchedPoints.length / (allTrackPoints.length || 1));
+                        
+                        // 匹配后验证：丢弃时间差超过1秒的匹配
+                        const validMatches = [];
+                        const invalidMatches = [];
+                        const maxAllowedTimeDiff = 1000; // 1秒
+                        
+                        matchedPoints.forEach(match => {
+                            const timeDiff = Math.abs(match.trackPoint.timestamp + effectiveOffset - match.gtPoint.timestamp);
+                            if (timeDiff <= maxAllowedTimeDiff) {
+                                validMatches.push(match);
+                            } else {
+                                invalidMatches.push(match);
+                                console.warn('[匹配验证] 时间差超限，丢弃匹配:', {
+                                    trackIdx: match.trackIdx,
+                                    gtIdx: match.gtIdx,
+                                    timeDiff: timeDiff + 'ms',
+                                    trackTime: new Date(match.trackPoint.timestamp).toISOString(),
+                                    gtTime: new Date(match.gtPoint.timestamp).toISOString(),
+                                    offsetApplied: effectiveOffset / 3600000 + 'h'
+                                });
+                            }
+                        });
+                        
+                        console.log('[评分调试] 有效匹配数量:', validMatches.length);
+                        console.log('[评分调试] 无效匹配数量（时间差>1秒）:', invalidMatches.length);
+                        
+                        if (invalidMatches.length > 0 && validMatches.length === 0) {
+                            console.error('[匹配验证] 所有匹配均无效！时间偏移可能不正确，请检查时间戳或手动设置偏移');
+                        }
+                        
+                        if (validMatches.length > 0) {
+                            console.log('[评分调试] 匹配距离示例:', validMatches.slice(0, 3).map(m => m.distance.toFixed(2)));
+                            
+                            // 找出误差最大的一对点
+                            const maxDistanceMatch = validMatches.reduce((max, m) => m.distance > max.distance ? m : max, validMatches[0]);
+                            console.log('[评分调试] 误差最大的匹配点:');
+                            console.log('  感知点 #' + maxDistanceMatch.trackIdx + ':', {
+                                trackID: maxDistanceMatch.trackPoint.trackID,
+                                objectID: maxDistanceMatch.trackPoint.objectID,
+                                latitude: maxDistanceMatch.trackPoint.latitude.toFixed(6),
+                                longitude: maxDistanceMatch.trackPoint.longitude.toFixed(6),
+                                height: maxDistanceMatch.trackPoint.height,
+                                time: new Date(maxDistanceMatch.trackPoint.timestamp).toISOString()
+                            });
+                            console.log('  真值点 #' + maxDistanceMatch.gtIdx + ':', {
+                                latitude: maxDistanceMatch.gtPoint.latitude.toFixed(6),
+                                longitude: maxDistanceMatch.gtPoint.longitude.toFixed(6),
+                                altitude: maxDistanceMatch.gtPoint.altitude,
+                                time: new Date(maxDistanceMatch.gtPoint.timestamp).toISOString()
+                            });
+                            console.log('  水平距离误差:', maxDistanceMatch.distance.toFixed(2), 'm');
+                            console.log('  高度误差:', maxDistanceMatch.heightDiff.toFixed(2), 'm');
+                        }
+                        
+                        // 用户已手动选择轨迹，直接使用匹配结果（不再自动过滤干扰目标）
                         const totalPointsCount = allTrackPoints.length;
-                        const matchedCount = matchedPoints.length;
+                        const matchedCount = validMatches.length;
                         const matchRate = totalPointsCount > 0 ? matchedCount / totalPointsCount : 0;
                         
-                        const avgDistance = matchedPoints.length > 0 
-                            ? matchedPoints.reduce((sum, m) => sum + m.distance, 0) / matchedPoints.length 
+                        const avgDistance = validMatches.length > 0 
+                            ? validMatches.reduce((sum, m) => sum + m.distance, 0) / validMatches.length 
                             : Infinity;
                         
-                        const avgHeightDiff = matchedPoints.length > 0 
-                            ? matchedPoints.reduce((sum, m) => sum + m.heightDiff, 0) / matchedPoints.length 
+                        const avgHeightDiff = validMatches.length > 0 
+                            ? validMatches.reduce((sum, m) => sum + m.heightDiff, 0) / validMatches.length 
                             : Infinity;
                         
-                        const maxDistance = matchedPoints.length > 0 
-                            ? Math.max(...matchedPoints.map(m => m.distance)) 
+                        const maxDistance = validMatches.length > 0 
+                            ? Math.max(...validMatches.map(m => m.distance)) 
                             : Infinity;
                         
                         const matchScore = Math.min(100, matchRate * 100);
@@ -1240,12 +1484,26 @@
                         else if (avgHeightDiff <= 100) heightScore = 40;
                         else heightScore = Math.max(0, 100 - avgHeightDiff * 0.5);
                         
-                        const coverageScore = matchedPoints.length > 0 ? Math.min(100, (matchedPoints.length / (groundTruthTracks.value.reduce((sum, t) => sum + t.points.length, 0) || 1)) * 100) : 0;
+                        const coverageScore = validMatches.length > 0 ? Math.min(100, (validMatches.length / (groundTruthTracks.value.reduce((sum, t) => sum + t.points.length, 0) || 1)) * 100) : 0;
                         
-                        const warnings = detectMissingFields(tracks.value);
+                        const warnings = detectMissingFields(selectedTracksData);
                         
-                        if (unmatchedPoints.length > 0) {
-                            warnings.push(`有 ${unmatchedPoints.length} 个感知点无法在真值轨迹中找到匹配`);
+                        // 时间偏移信息
+                        let timeOffsetInfo = '';
+                        if (userOffset !== 0) {
+                            timeOffsetInfo = `使用手动设置的时间偏移: ${userOffset}ms`;
+                        } else if (detectedOffset.sampleCount > 0) {
+                            timeOffsetInfo = `自动检测时间偏移: ${detectedOffset.offset}ms (基于${detectedOffset.sampleCount}个样本，置信度${detectedOffset.confidence.toFixed(1)}%)`;
+                        } else {
+                            timeOffsetInfo = '无法自动检测时间偏移，请手动设置';
+                            if (matchedCount === 0) {
+                                warnings.push('无法自动检测时间偏移，请手动设置时间偏移量');
+                            }
+                        }
+                        
+                        const unmatchedCount = totalPointsCount - matchedCount;
+                        if (unmatchedCount > 0 && matchedCount > 0) {
+                            warnings.push(`有 ${unmatchedCount} 个选中轨迹点无法在真值轨迹中找到匹配 (匹配窗口: 2000ms)`);
                         }
                         
                         const metrics = [
@@ -1280,7 +1538,8 @@
                         scoreResult.value = {
                             totalScore,
                             metrics,
-                            warnings
+                            warnings,
+                            timeOffsetInfo
                         };
                         
                         setLoading(false);
@@ -1290,7 +1549,7 @@
                 onMounted(() => { initMap(); loadDemoData(); });
                 
                 return { 
-                    tracks, selectedTracks, filterText, filteredTracks, isAllSelected, totalPoints, sensorInfo, 
+                    tracks, groundTruthTracks, groundTruthLoaded, selectedTracks, filterText, filteredTracks, isAllSelected, totalPoints, sensorInfo, 
                     handleFileUpload, handleCSVUpload, toggleTrack, selectAll, deselectAll, toggleSelectAll, focusTrack,
                     isLoading, loadingText, loadingSubtext,
                     timeOffset, timeWindow, scoreResult, canScore, calculateScore
