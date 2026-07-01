@@ -493,7 +493,7 @@
                 const timeOffset = ref(0);
                 const timeToleranceMs = ref(2000);
                 const distanceToleranceM = ref(150);
-                const groundTruthNeighborhoodM = ref(50);
+                const groundTruthNeighborhoodM = ref(150);
                 const scoreResult = ref(null);
                 
                 const colorPool = ['#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1', '#14b8a6', '#d946ef', '#f43f5e', '#3b82f6'];
@@ -608,25 +608,51 @@
                 };
                 
                 const parseISODate = (dateStr) => {
-                    const len = dateStr.length;
-                    if (len < 19) return new Date(dateStr).getTime();
+                    if (!dateStr) return 0;
                     
-                    const year = (dateStr.charCodeAt(0) - 48) * 1000 + (dateStr.charCodeAt(1) - 48) * 100 + 
-                                (dateStr.charCodeAt(2) - 48) * 10 + (dateStr.charCodeAt(3) - 48);
-                    const month = ((dateStr.charCodeAt(5) - 48) * 10 + (dateStr.charCodeAt(6) - 48)) - 1;
-                    const day = (dateStr.charCodeAt(8) - 48) * 10 + (dateStr.charCodeAt(9) - 48);
-                    const hour = (dateStr.charCodeAt(11) - 48) * 10 + (dateStr.charCodeAt(12) - 48);
-                    const minute = (dateStr.charCodeAt(14) - 48) * 10 + (dateStr.charCodeAt(15) - 48);
-                    const second = (dateStr.charCodeAt(17) - 48) * 10 + (dateStr.charCodeAt(18) - 48);
-                    
-                    let ms = 0;
-                    if (len > 20 && dateStr[19] === '.') {
-                        for (let i = 20; i < Math.min(len, 23); i++) {
-                            ms = ms * 10 + (dateStr.charCodeAt(i) - 48);
+                    // 尝试多种格式解析
+                    // 格式1: YYYY-MM-DDTHH:MM:SSZ (ISO)
+                    if (dateStr.includes('T') && dateStr.includes('Z')) {
+                        const parts = dateStr.split('T');
+                        const dateParts = parts[0].split('-');
+                        const timeParts = parts[1].replace('Z', '').split(':');
+                        if (dateParts.length === 3 && timeParts.length >= 2) {
+                            const year = parseInt(dateParts[0]);
+                            const month = parseInt(dateParts[1]) - 1;
+                            const day = parseInt(dateParts[2]);
+                            const hour = parseInt(timeParts[0]);
+                            const minute = parseInt(timeParts[1]);
+                            const second = timeParts[2] ? parseInt(timeParts[2]) : 0;
+                            return Date.UTC(year, month, day, hour, minute, second);
                         }
                     }
                     
-                    return new Date(Date.UTC(year, month, day, hour, minute, second, ms)).getTime();
+                    // 格式2: YYYY/MM/DD H:MM 或 YYYY/M/D H:MM
+                    const slashMatch = dateStr.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})\s+(\d{1,2}):(\d{1,2})$/);
+                    if (slashMatch) {
+                        const year = parseInt(slashMatch[1]);
+                        const month = parseInt(slashMatch[2]) - 1;
+                        const day = parseInt(slashMatch[3]);
+                        const hour = parseInt(slashMatch[4]);
+                        const minute = parseInt(slashMatch[5]);
+                        return Date.UTC(year, month, day, hour, minute, 0);
+                    }
+                    
+                    // 格式3: YYYY-MM-DD HH:MM:SS
+                    const spaceMatch = dateStr.match(/^(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{1,2}):(\d{1,2})$/);
+                    if (spaceMatch) {
+                        const year = parseInt(spaceMatch[1]);
+                        const month = parseInt(spaceMatch[2]) - 1;
+                        const day = parseInt(spaceMatch[3]);
+                        const hour = parseInt(spaceMatch[4]);
+                        const minute = parseInt(spaceMatch[5]);
+                        const second = parseInt(spaceMatch[6]);
+                        return Date.UTC(year, month, day, hour, minute, second);
+                    }
+                    
+                    // 降级到标准解析
+                    const parsed = new Date(dateStr);
+                    return isNaN(parsed.getTime()) ? 0 : parsed.getTime();
                 };
                 
                 const handleCSVUpload = (event) => {
@@ -748,22 +774,44 @@
                     const uploadItems = Array.isArray(data) ? data : [data];
                     
                     try {
-                        uploadItems.forEach(uploadItem => {
+                        uploadItems.forEach((uploadItem, uploadIdx) => {
+                            if (!uploadItem || typeof uploadItem !== 'object') {
+                                console.warn(`[processData] uploadItems[${uploadIdx}] 无效，跳过`);
+                                return;
+                            }
                             if (!uploadItem.data || !Array.isArray(uploadItem.data)) return;
-                            uploadItem.data.forEach(item => {
-                                if (item.sensor) {
-                                    const s = item.sensor;
-                                    sensorInfo.value = {
-                                        manufacturerID: s.sensorManufacturerID || '',
-                                        sn: s.sensorSN || '',
-                                        operator: s.sensorOperatorInfo?.entityName || '',
-                                        location: s.sensorLocation ? `${s.sensorLocation.latitude?.toFixed(4)}, ${s.sensorLocation.longitude?.toFixed(4)}` : '',
-                                        category: s.sensorExtra?.sensorCategory || ''
-                                    };
-                                    if (s.sensorLocation) updateSensorMarker(s.sensorLocation.latitude, s.sensorLocation.longitude, s);
+                            uploadItem.data.forEach((item, itemIdx) => {
+                                if (!item || typeof item !== 'object') {
+                                    console.warn(`[processData] data[${itemIdx}] 无效，跳过`);
+                                    return;
                                 }
-                                if (item.perceivedStatus && Array.isArray(item.perceivedStatus)) {
-                                    item.perceivedStatus.forEach(status => processTrack(status, item.CRS));
+                                try {
+                                    if (item.sensor) {
+                                        const s = item.sensor;
+                                        sensorInfo.value = {
+                                            manufacturerID: s.sensorManufacturerID || '',
+                                            sn: s.sensorSN || '',
+                                            operator: s.sensorOperatorInfo?.entityName || '',
+                                            location: s.sensorLocation ? `${s.sensorLocation.latitude?.toFixed(4)}, ${s.sensorLocation.longitude?.toFixed(4)}` : '',
+                                            category: s.sensorExtra?.sensorCategory || ''
+                                        };
+                                        if (s.sensorLocation) updateSensorMarker(s.sensorLocation.latitude, s.sensorLocation.longitude, s);
+                                    }
+                                    if (item.perceivedStatus && Array.isArray(item.perceivedStatus)) {
+                                        item.perceivedStatus.forEach((status, statusIdx) => {
+                                            if (!status || typeof status !== 'object') {
+                                                console.warn(`[processData] perceivedStatus[${statusIdx}] 无效，跳过:`, status);
+                                                return;
+                                            }
+                                            try {
+                                                processTrack(status, item.CRS);
+                                            } catch (trackErr) {
+                                                console.error(`[processData] 处理perceivedStatus[${statusIdx}]失败:`, trackErr, status);
+                                            }
+                                        });
+                                    }
+                                } catch (itemErr) {
+                                    console.error(`[processData] 处理data[${itemIdx}]失败:`, itemErr, item);
                                 }
                             });
                         });
@@ -784,7 +832,15 @@
                 };
                 
                 const processTrack = (status, crs) => {
+                    if (!status || typeof status !== 'object') {
+                        console.warn('[processTrack] 跳过无效的状态对象:', status);
+                        return;
+                    }
                     const trackID = status.trackID;
+                    if (!trackID) {
+                        console.warn('[processTrack] 跳过缺少trackID的状态:', status);
+                        return;
+                    }
                     let existingTrack = tracks.value.find(t => t.trackID === trackID);
                     if (!existingTrack) {
                         existingTrack = {
@@ -797,8 +853,12 @@
                     
                     // 优先从 trajectoryPoints 读取完整轨迹
                     if (status.objectStatusExtra?.trajectoryPoints && Array.isArray(status.objectStatusExtra.trajectoryPoints)) {
-                        status.objectStatusExtra.trajectoryPoints.forEach(pos => {
-                            if (pos.longitude && pos.latitude) {
+                        status.objectStatusExtra.trajectoryPoints.forEach((pos, idx) => {
+                            if (!pos || typeof pos !== 'object') {
+                                console.warn(`[processTrack] trajectoryPoints[${idx}] 为null，跳过`);
+                                return;
+                            }
+                            if (pos.longitude != null && pos.latitude != null) {
                                 existingTrack.points.push({
                                     longitude: pos.longitude, latitude: pos.latitude, height: pos.height,
                                     deltaLongitude: pos.deltaLongitude, deltaLatitude: pos.deltaLatitude,
@@ -809,8 +869,12 @@
                         });
                     } else if (status.objectPosition && Array.isArray(status.objectPosition)) {
                         // 降级到 objectPosition
-                        status.objectPosition.forEach(pos => {
-                            if (pos.positionBase === 'Ground' && pos.longitude && pos.latitude) {
+                        status.objectPosition.forEach((pos, idx) => {
+                            if (!pos || typeof pos !== 'object') {
+                                console.warn(`[processTrack] objectPosition[${idx}] 为null，跳过`);
+                                return;
+                            }
+                            if (pos.positionBase === 'Ground' && pos.longitude != null && pos.latitude != null) {
                                 // 从 objectVelocity 获取速度信息
                                 const velocity = status.objectVelocity?.find(v => v.velocityBase === 'Ground');
                                 existingTrack.points.push({
@@ -876,8 +940,10 @@
                     // 绘制感知轨迹
                     tracks.value.forEach(track => {
                         if (!selectedTracks.value.includes(track.trackID)) return;
-                        if (track.points.length === 0) return;
-                        const latlngs = track.points.map(p => [p.latitude, p.longitude]);
+                        // 过滤无效点
+                        const validPoints = track.points.filter(p => p.latitude != null && p.longitude != null && !isNaN(p.latitude) && !isNaN(p.longitude));
+                        if (validPoints.length === 0) return;
+                        const latlngs = validPoints.map(p => [p.latitude, p.longitude]);
                         const color = track.color;
                         
                         const polyline = L.polyline(latlngs, { color, weight: 3, opacity: 0.8, lineCap: 'round', lineJoin: 'round' }).addTo(map.value);
@@ -902,8 +968,8 @@
                         endMarker.bindPopup(`<b>终点</b><br>轨迹: ${track.trackID}`);
                         
                         const pointMarkers = [];
-                        track.points.forEach((p, idx) => {
-                            if (idx === 0 || idx === track.points.length - 1) return;
+                        validPoints.forEach((p, idx) => {
+                            if (idx === 0 || idx === validPoints.length - 1) return;
                             const marker = L.circleMarker([p.latitude, p.longitude], { 
                                 radius: 4, 
                                 fillColor: color, 
@@ -921,8 +987,9 @@
                     
                     // 绘制真值轨迹
                     groundTruthTracks.value.forEach(track => {
-                        if (track.points.length === 0) return;
-                        const latlngs = track.points.map(p => [p.latitude, p.longitude]);
+                        const validPoints = track.points.filter(p => p.latitude != null && p.longitude != null && !isNaN(p.latitude) && !isNaN(p.longitude));
+                        if (validPoints.length === 0) return;
+                        const latlngs = validPoints.map(p => [p.latitude, p.longitude]);
                         const color = track.color;
                         
                         const polyline = L.polyline(latlngs, { color, weight: 3, opacity: 0.9, lineCap: 'round', lineJoin: 'round', dashArray: '10, 10' }).addTo(map.value);
@@ -947,8 +1014,8 @@
                         endMarker.bindPopup(`<b>真值终点</b><br>文件: ${track.objectID}`);
                         
                         const pointMarkers = [];
-                        track.points.forEach((p, idx) => {
-                            if (idx === 0 || idx === track.points.length - 1) return;
+                        validPoints.forEach((p, idx) => {
+                            if (idx === 0 || idx === validPoints.length - 1) return;
                             const marker = L.circleMarker([p.latitude, p.longitude], { 
                                 radius: 4, 
                                 fillColor: color, 
@@ -966,10 +1033,10 @@
                     // 自动调整地图视野
                     const allPoints = [];
                     tracks.value.filter(t => selectedTracks.value.includes(t.trackID)).forEach(t => {
-                        t.points.forEach(p => allPoints.push([p.latitude, p.longitude]));
+                        t.points.filter(p => p.latitude != null && p.longitude != null).forEach(p => allPoints.push([p.latitude, p.longitude]));
                     });
                     groundTruthTracks.value.forEach(t => {
-                        t.points.forEach(p => allPoints.push([p.latitude, p.longitude]));
+                        t.points.filter(p => p.latitude != null && p.longitude != null).forEach(p => allPoints.push([p.latitude, p.longitude]));
                     });
                     
                     if (allPoints.length > 0 && map.value) {
@@ -1008,9 +1075,11 @@
                 // 显示单个轨迹
                 const showTrack = (trackID) => {
                     const track = tracks.value.find(t => t.trackID === trackID);
-                    if (!track || track.points.length === 0) return;
+                    if (!track) return;
+                    const validPoints = track.points.filter(p => p.latitude != null && p.longitude != null && !isNaN(p.latitude) && !isNaN(p.longitude));
+                    if (validPoints.length === 0) return;
                     
-                    const latlngs = track.points.map(p => [p.latitude, p.longitude]);
+                    const latlngs = validPoints.map(p => [p.latitude, p.longitude]);
                     const color = track.color;
                     
                     const polyline = L.polyline(latlngs, { color, weight: 3, opacity: 0.8, lineCap: 'round', lineJoin: 'round' }).addTo(map.value);
@@ -1034,8 +1103,8 @@
                     endMarker.bindPopup(`<b>终点</b><br>轨迹: ${track.trackID}`);
                     
                     const pointMarkers = [];
-                    track.points.forEach((p, idx) => {
-                        if (idx === 0 || idx === track.points.length - 1) return;
+                    validPoints.forEach((p, idx) => {
+                        if (idx === 0 || idx === validPoints.length - 1) return;
                         const marker = L.circleMarker([p.latitude, p.longitude], { 
                             radius: 4, 
                             fillColor: color, 
@@ -1092,8 +1161,9 @@
                         selectedTracks.value.push(track.trackID); 
                         showTrack(track.trackID);
                     }
-                    if (track.points.length > 0) {
-                        const bounds = track.points.map(p => [p.latitude, p.longitude]);
+                    const validPoints = track.points.filter(p => p.latitude != null && p.longitude != null && !isNaN(p.latitude) && !isNaN(p.longitude));
+                    if (validPoints.length > 0) {
+                        const bounds = validPoints.map(p => [p.latitude, p.longitude]);
                         map.value.fitBounds(bounds, { padding: [80, 80], maxZoom: 16 });
                     }
                 };
@@ -1144,12 +1214,12 @@
                     }
                     
                     // 计算时间范围
-                    const trackTimes = validTrackPoints.map(p => p.timestamp);
-                    const gtTimes = validGtPoints.map(p => p.timestamp);
-                    const trackMin = Math.min(...trackTimes);
-                    const trackMax = Math.max(...trackTimes);
-                    const gtMin = Math.min(...gtTimes);
-                    const gtMax = Math.max(...gtTimes);
+                    const trackTimes = validTrackPoints.map(p => p.timestamp).sort((a, b) => a - b);
+                    const gtTimes = validGtPoints.map(p => p.timestamp).sort((a, b) => a - b);
+                    const trackMin = trackTimes[0];
+                    const trackMax = trackTimes[trackTimes.length - 1];
+                    const gtMin = gtTimes[0];
+                    const gtMax = gtTimes[gtTimes.length - 1];
                     
                     const oneHour = 3600000;
                     const eightHour = 28800000;
@@ -1157,7 +1227,7 @@
                     console.log('[时间偏移检测] 轨迹时间范围:', new Date(trackMin).toISOString(), '~', new Date(trackMax).toISOString());
                     console.log('[时间偏移检测] 真值时间范围:', new Date(gtMin).toISOString(), '~', new Date(gtMax).toISOString());
                     
-                    // 检查时间范围是否重叠（考虑1小时缓冲）
+                    // 检查时间范围是否直接重叠（考虑1小时缓冲）
                     const hasDirectOverlap = (trackMin - oneHour) <= gtMax && (trackMax + oneHour) >= gtMin;
                     
                     if (hasDirectOverlap) {
@@ -1165,29 +1235,22 @@
                         return { offset: 0, confidence: 100, sampleCount: validTrackPoints.length };
                     }
                     
-                    // 检查 track-8h 是否与真值重叠
-                    const trackMinMinus8h = trackMin - eightHour;
-                    const trackMaxMinus8h = trackMax - eightHour;
-                    const hasMinus8hOverlap = (trackMinMinus8h - oneHour) <= gtMax && (trackMaxMinus8h + oneHour) >= gtMin;
-                    
-                    if (hasMinus8hOverlap) {
-                        console.log('[时间偏移检测] 轨迹-8h后与真值重叠，使用-8小时偏移');
-                        return { offset: -eightHour, confidence: 100, sampleCount: validTrackPoints.length };
+                    // 尝试±8小时偏移（处理时区问题）
+                    const candidateOffsets = [-eightHour, eightHour];
+                    for (const offset of candidateOffsets) {
+                        const shiftedTrackMin = trackMin + offset;
+                        const shiftedTrackMax = trackMax + offset;
+                        const hasOverlap = (shiftedTrackMin - oneHour) <= gtMax && (shiftedTrackMax + oneHour) >= gtMin;
+                        
+                        if (hasOverlap) {
+                            console.log(`[时间偏移检测] 使用偏移 ${offset}ms (${offset / 3600000}小时) 后时间范围重叠`);
+                            return { offset, confidence: 90, sampleCount: validTrackPoints.length };
+                        }
                     }
                     
-                    // 检查 track+8h 是否与真值重叠
-                    const trackMinPlus8h = trackMin + eightHour;
-                    const trackMaxPlus8h = trackMax + eightHour;
-                    const hasPlus8hOverlap = (trackMinPlus8h - oneHour) <= gtMax && (trackMaxPlus8h + oneHour) >= gtMin;
-                    
-                    if (hasPlus8hOverlap) {
-                        console.log('[时间偏移检测] 轨迹+8h后与真值重叠，使用+8小时偏移');
-                        return { offset: eightHour, confidence: 100, sampleCount: validTrackPoints.length };
-                    }
-                    
-                    // 都不重叠，返回0偏移并警告
+                    // 如果都不重叠，使用0偏移并警告
                     console.warn('[时间偏移检测] 时间范围无重叠，使用0偏移。请检查时间戳或手动设置偏移');
-                    return { offset: 0, confidence: 30, sampleCount: validTrackPoints.length };
+                    return { offset: 0, confidence: 50, sampleCount: validTrackPoints.length };
                 };
                 
                 const findMatchingGroundTruthPoint = (trackPoint, sortedGtPoints, timeOffset, timeToleranceMs, distanceToleranceM) => {
@@ -1296,22 +1359,17 @@
                         console.log('[评分调试] 选中的轨迹:', selectedTrackIDs);
                         
                         const allTrackPoints = [];
-                        const selectedTracksData = tracks.value.filter(t => selectedTrackIDs.includes(t.trackID));
                         tracks.value.forEach(track => {
                             // 只处理选中的轨迹
                             if (!selectedTrackIDs.includes(track.trackID)) return;
                             
-                            // 优先从 track.points 获取（这是 processTrack 存储的）
+                            // 只使用 track.points（processTrack 已标准化字段名）
                             if (track.points && track.points.length > 0) {
                                 track.points.forEach(p => {
-                                    allTrackPoints.push({
-                                        ...p,
-                                        trackID: track.trackID,
-                                        objectID: track.objectID
-                                    });
-                                });
-                            } else if (track.objectStatusExtra?.trajectoryPoints) {
-                                track.objectStatusExtra.trajectoryPoints.forEach(p => {
+                                    // 过滤无效点：必须有时间戳和有效经纬度
+                                    if (p.timestamp == null || isNaN(p.timestamp) || p.timestamp <= 0) return;
+                                    if (p.latitude == null || p.longitude == null) return;
+                                    if (isNaN(p.latitude) || isNaN(p.longitude)) return;
                                     allTrackPoints.push({
                                         ...p,
                                         trackID: track.trackID,
@@ -1355,40 +1413,10 @@
                         console.log('[评分调试] 检测到的偏移:', detectedOffset);
                         console.log('[评分调试] 用户设置偏移:', userOffset);
                         
-                        // 确定有效偏移
-                        let effectiveOffset = detectedOffset.offset;
-                        if (userOffset !== 0) {
-                            effectiveOffset = userOffset;
-                        } else {
-                            // 检查时间范围是否有重叠
-                            const trackRange = trackMax - trackMin;
-                            const gtRange = gtMax - gtMin;
-                            
-                            // 检查是否存在8小时差距
-                            const eightHourMs = 28800000;
-                            const diff1 = Math.abs((trackMin + eightHourMs) - gtMin);
-                            const diff2 = Math.abs((trackMin - eightHourMs) - gtMin);
-                            
-                            console.log('[评分调试] 原始时间差(起始):', trackMin - gtMin, `(${((trackMin - gtMin) / 3600000).toFixed(2)}小时)`);
-                            console.log('[评分调试] 原始时间差(中位数):', trackTimes[Math.floor(trackTimes.length / 2)] - gtTimes[Math.floor(gtTimes.length / 2)], `(${((trackTimes[Math.floor(trackTimes.length / 2)] - gtTimes[Math.floor(gtTimes.length / 2)]) / 3600000).toFixed(2)}小时)`);
-                            
-                            // 如果时间范围有重叠（考虑1小时的缓冲），使用检测到的偏移
-                            const hasOverlap = (trackMin - 3600000) <= gtMax && (trackMax + 3600000) >= gtMin;
-                            
-                            if (hasOverlap) {
-                                console.log('[评分调试] 时间范围有重叠，使用检测到的偏移');
-                                effectiveOffset = detectedOffset.offset;
-                            } else if (diff1 < 3600000) {
-                                console.log('[评分调试] 检测到约-8小时差距，使用-8小时偏移');
-                                effectiveOffset = -eightHourMs;
-                            } else if (diff2 < 3600000) {
-                                console.log('[评分调试] 检测到约+8小时差距，使用+8小时偏移');
-                                effectiveOffset = eightHourMs;
-                            } else {
-                                console.log('[评分调试] 时间范围无重叠且非8小时差距，使用检测到的偏移');
-                                effectiveOffset = detectedOffset.offset;
-                            }
-                        }
+                        // 确定有效偏移：优先使用用户手动设置的偏移，否则使用自动检测的偏移
+                        let effectiveOffset = userOffset !== 0 ? userOffset : detectedOffset.offset;
+                        console.log('[评分调试] 原始时间差(起始):', trackMin - gtMin, `(${((trackMin - gtMin) / 3600000).toFixed(2)}小时)`);
+                        console.log('[评分调试] 原始时间差(中位数):', trackTimes[Math.floor(trackTimes.length / 2)] - gtTimes[Math.floor(gtTimes.length / 2)], `(${((trackTimes[Math.floor(trackTimes.length / 2)] - gtTimes[Math.floor(gtTimes.length / 2)]) / 3600000).toFixed(2)}小时)`);
                         
                         console.log('[评分调试] 最终使用偏移:', effectiveOffset, `(${effectiveOffset / 3600000}小时)`);
                         
@@ -1439,34 +1467,8 @@
                         console.log('[评分调试] 未匹配数量:', unmatchedPoints.length);
                         console.log('[评分调试] 匹配率:', matchedPoints.length / (allTrackPoints.length || 1));
                         
-                        // 匹配后验证：丢弃时间差超过1秒的匹配
-                        const validMatches = [];
-                        const invalidMatches = [];
-                        const maxAllowedTimeDiff = 1000; // 1秒
-                        
-                        matchedPoints.forEach(match => {
-                            const timeDiff = Math.abs(match.trackPoint.timestamp + effectiveOffset - match.gtPoint.timestamp);
-                            if (timeDiff <= maxAllowedTimeDiff) {
-                                validMatches.push(match);
-                            } else {
-                                invalidMatches.push(match);
-                                console.warn('[匹配验证] 时间差超限，丢弃匹配:', {
-                                    trackIdx: match.trackIdx,
-                                    gtIdx: match.gtIdx,
-                                    timeDiff: timeDiff + 'ms',
-                                    trackTime: new Date(match.trackPoint.timestamp).toISOString(),
-                                    gtTime: new Date(match.gtPoint.timestamp).toISOString(),
-                                    offsetApplied: effectiveOffset / 3600000 + 'h'
-                                });
-                            }
-                        });
-                        
-                        console.log('[评分调试] 有效匹配数量:', validMatches.length);
-                        console.log('[评分调试] 无效匹配数量（时间差>1秒）:', invalidMatches.length);
-                        
-                        if (invalidMatches.length > 0 && validMatches.length === 0) {
-                            console.error('[匹配验证] 所有匹配均无效！时间偏移可能不正确，请检查时间戳或手动设置偏移');
-                        }
+                        // 匹配已经经过了时间窗口和空间距离的筛选，不需要额外验证
+                        const validMatches = matchedPoints;
                         
                         if (validMatches.length > 0) {
                             console.log('[评分调试] 匹配距离示例:', validMatches.slice(0, 3).map(m => m.distance.toFixed(2)));
@@ -1510,38 +1512,215 @@
                         // 2. 虚警率计算
                         const neighborhoodThreshold = parseInt(groundTruthNeighborhoodM.value) || 50;
                         const windowSize = parseInt(timeToleranceMs.value) || 2000;
+                        
+                        // 去重：按时间戳分组，每个时间戳只保留一个点
+                        const uniqueTrackPoints = [];
+                        const seenTimestamps = new Set();
+                        allTrackPoints.forEach(tp => {
+                            if (!seenTimestamps.has(tp.timestamp)) {
+                                seenTimestamps.add(tp.timestamp);
+                                uniqueTrackPoints.push(tp);
+                            }
+                        });
+                        console.log('[虚警检测] 原始轨迹点数:', allTrackPoints.length, ', 去重后:', uniqueTrackPoints.length);
+                        
+                        // 数据质量诊断：分析时间戳分布
+                        const trackTsArray = uniqueTrackPoints.map(tp => tp.timestamp).sort((a, b) => a - b);
+                        const gtTsArray = sortedGtPoints.map(gp => gp.timestamp).sort((a, b) => a - b);
+                        const trackIntervals = [];
+                        const gtIntervals = [];
+                        for (let i = 1; i < trackTsArray.length; i++) {
+                            trackIntervals.push(trackTsArray[i] - trackTsArray[i-1]);
+                        }
+                        for (let i = 1; i < gtTsArray.length; i++) {
+                            gtIntervals.push(gtTsArray[i] - gtTsArray[i-1]);
+                        }
+                        console.log('[数据质量] 轨迹时间戳范围:', new Date(trackTsArray[0]).toISOString(), '~', new Date(trackTsArray[trackTsArray.length-1]).toISOString());
+                        console.log('[数据质量] 真值时间戳范围:', new Date(gtTsArray[0]).toISOString(), '~', new Date(gtTsArray[gtTsArray.length-1]).toISOString());
+                        console.log('[数据质量] 轨迹采样间隔统计: min=', Math.min(...trackIntervals), 'ms, max=', Math.max(...trackIntervals), 'ms, avg=', (trackIntervals.reduce((a,b)=>a+b,0)/trackIntervals.length).toFixed(2), 'ms');
+                        console.log('[数据质量] 真值采样间隔统计: min=', Math.min(...gtIntervals), 'ms, max=', Math.max(...gtIntervals), 'ms, avg=', (gtIntervals.reduce((a,b)=>a+b,0)/gtIntervals.length).toFixed(2), 'ms');
+                        
+                        // 空间最近点时间差分析
+                        const spatialNearestTimeDiffs = [];
+                        uniqueTrackPoints.forEach(tp => {
+                            const targetTs = tp.timestamp + effectiveOffset;
+                            let minDist = Infinity;
+                            let minTimeDiff = Infinity;
+                            for (const gp of sortedGtPoints) {
+                                const dist = calculateDistance(tp.latitude, tp.longitude, gp.latitude, gp.longitude);
+                                if (dist < minDist) {
+                                    minDist = dist;
+                                    minTimeDiff = Math.abs(gp.timestamp - targetTs);
+                                }
+                            }
+                            if (minDist < 1000) { // 只统计1km内的点
+                                spatialNearestTimeDiffs.push(minTimeDiff);
+                            }
+                        });
+                        if (spatialNearestTimeDiffs.length > 0) {
+                            spatialNearestTimeDiffs.sort((a, b) => a - b);
+                            const medianTimeDiff = spatialNearestTimeDiffs[Math.floor(spatialNearestTimeDiffs.length / 2)];
+                            console.log('[数据质量] 空间最近点时间差统计: min=', Math.min(...spatialNearestTimeDiffs), 'ms, max=', Math.max(...spatialNearestTimeDiffs), 'ms, median=', medianTimeDiff, 'ms');
+                            console.log('[数据质量] 空间最近点时间差 < 2000ms:', spatialNearestTimeDiffs.filter(t => t <= 2000).length, '/', spatialNearestTimeDiffs.length);
+                            console.log('[数据质量] 空间最近点时间差 < 5000ms:', spatialNearestTimeDiffs.filter(t => t <= 5000).length, '/', spatialNearestTimeDiffs.length);
+                        }
+                        
+                        // 按对象分组分析
+                        const trackPointsByTrackID = {};
+                        uniqueTrackPoints.forEach(tp => {
+                            const tid = tp.trackID || 'unknown';
+                            if (!trackPointsByTrackID[tid]) trackPointsByTrackID[tid] = [];
+                            trackPointsByTrackID[tid].push(tp);
+                        });
+                        
+                        const gtPointsByObjectID = {};
+                        sortedGtPoints.forEach(gp => {
+                            const oid = gp.objectID || gp.trackID || 'unknown';
+                            if (!gtPointsByObjectID[oid]) gtPointsByObjectID[oid] = [];
+                            gtPointsByObjectID[oid].push(gp);
+                        });
+                        
+                        console.log('[数据质量] 轨迹数量:', Object.keys(trackPointsByTrackID).length);
+                        console.log('[数据质量] 真值对象数量:', Object.keys(gtPointsByObjectID).length);
+                        
+                        // 对每个轨迹，找到空间上最接近的真值对象
+                        const perObjectAnalysis = [];
+                        for (const [trackID, trackPoints] of Object.entries(trackPointsByTrackID)) {
+                            let bestObjectID = null;
+                            let bestAvgDist = Infinity;
+                            let bestAvgTimeDiff = Infinity;
+                            let bestMatchCount = 0;
+                            
+                            for (const [objectID, gtPoints] of Object.entries(gtPointsByObjectID)) {
+                                let totalDist = 0;
+                                let totalTimeDiff = 0;
+                                let matchCount = 0;
+                                let validPairs = 0;
+                                
+                                for (const tp of trackPoints) {
+                                    const targetTs = tp.timestamp + effectiveOffset;
+                                    let minDist = Infinity;
+                                    let minTimeDiff = Infinity;
+                                    for (const gp of gtPoints) {
+                                        const dist = calculateDistance(tp.latitude, tp.longitude, gp.latitude, gp.longitude);
+                                        const timeDiff = Math.abs(gp.timestamp - targetTs);
+                                        if (dist < minDist) {
+                                            minDist = dist;
+                                            minTimeDiff = timeDiff;
+                                        }
+                                    }
+                                    if (minDist < 1000) {
+                                        totalDist += minDist;
+                                        totalTimeDiff += minTimeDiff;
+                                        validPairs++;
+                                        if (minTimeDiff <= windowSize) matchCount++;
+                                    }
+                                }
+                                
+                                if (validPairs > 0) {
+                                    const avgDist = totalDist / validPairs;
+                                    const avgTimeDiff = totalTimeDiff / validPairs;
+                                    if (avgDist < bestAvgDist) {
+                                        bestAvgDist = avgDist;
+                                        bestAvgTimeDiff = avgTimeDiff;
+                                        bestObjectID = objectID;
+                                        bestMatchCount = matchCount;
+                                    }
+                                }
+                            }
+                            
+                            perObjectAnalysis.push({
+                                trackID,
+                                pointCount: trackPoints.length,
+                                bestObjectID,
+                                bestAvgDist: bestAvgDist,
+                                bestAvgTimeDiff: bestAvgTimeDiff,
+                                matchCount: bestMatchCount,
+                                matchRate: trackPoints.length > 0 ? bestMatchCount / trackPoints.length : 0
+                            });
+                        }
+                        
+                        console.log('[数据质量] 按对象分组分析:');
+                        perObjectAnalysis.forEach(obj => {
+                            console.log(`  轨迹 ${obj.trackID}: 点数=${obj.pointCount}, 最佳匹配对象=${obj.bestObjectID}, 平均距离=${obj.bestAvgDist.toFixed(2)}m, 平均时间差=${obj.bestAvgTimeDiff.toFixed(0)}ms, 匹配率=${(obj.matchRate * 100).toFixed(2)}%`);
+                        });
+                        
                         let falseAlarmCount = 0;
-                        allTrackPoints.forEach(trackPoint => {
+                        console.log('[虚警检测] 真值邻域阈值:', neighborhoodThreshold + 'm, 时间窗口:', windowSize + 'ms');
+                        uniqueTrackPoints.forEach((trackPoint, idx) => {
                             const targetTs = trackPoint.timestamp + effectiveOffset;
                             let hasNeighbor = false;
+                            let nearestDist = Infinity;
+                            let nearestGtTimeDiff = Infinity;
+                            let nearestGtPoint = null;
                             for (const gp of sortedGtPoints) {
-                                if (Math.abs(gp.timestamp - targetTs) > windowSize) continue;
+                                const timeDiff = Math.abs(gp.timestamp - targetTs);
+                                if (timeDiff > windowSize) continue;
                                 const dist = calculateDistance(trackPoint.latitude, trackPoint.longitude, gp.latitude, gp.longitude);
+                                if (dist < nearestDist) {
+                                    nearestDist = dist;
+                                    nearestGtTimeDiff = timeDiff;
+                                    nearestGtPoint = gp;
+                                }
                                 if (dist <= neighborhoodThreshold) {
                                     hasNeighbor = true;
                                     break;
                                 }
                             }
-                            if (!hasNeighbor) falseAlarmCount++;
+                            if (!hasNeighbor) {
+                                falseAlarmCount++;
+                                // 输出前5个虚警点的详细信息
+                                if (falseAlarmCount <= 5) {
+                                    let debugInfo = '';
+                                    if (nearestDist === Infinity) {
+                                        let globalNearestDist = Infinity;
+                                        let globalNearestTimeDiff = Infinity;
+                                        for (const gp of sortedGtPoints) {
+                                            const d = calculateDistance(trackPoint.latitude, trackPoint.longitude, gp.latitude, gp.longitude);
+                                            const td = Math.abs(gp.timestamp - targetTs);
+                                            if (d < globalNearestDist) {
+                                                globalNearestDist = d;
+                                                globalNearestTimeDiff = td;
+                                            }
+                                        }
+                                        debugInfo = `时间窗口(${windowSize}ms)内无真值点，全局最近点距离: ${globalNearestDist.toFixed(2)}m, 时间差: ${globalNearestTimeDiff}ms (${(globalNearestTimeDiff/3600000).toFixed(2)}小时)`;
+                                    } else {
+                                        debugInfo = `最近真值点距离: ${nearestDist.toFixed(2)}m (超过阈值${neighborhoodThreshold}m), 时间差: ${nearestGtTimeDiff}ms`;
+                                    }
+                                    console.warn('[虚警检测] 虚警点', idx + 1, ':', debugInfo, ', 感知点时间:', new Date(trackPoint.timestamp).toISOString(), ', 偏移后时间:', new Date(targetTs).toISOString());
+                                }
+                            }
                         });
-                        const falseAlarmRate = allTrackPoints.length > 0 ? falseAlarmCount / allTrackPoints.length : 0;
+                        const falseAlarmRate = uniqueTrackPoints.length > 0 ? falseAlarmCount / uniqueTrackPoints.length : 0;
+                        console.log('[虚警检测] 虚警点数:', falseAlarmCount, '/', uniqueTrackPoints.length, '虚警率:', (falseAlarmRate * 100).toFixed(2) + '%');
                         
                         // 3. 漏检率计算
                         let missCount = 0;
-                        sortedGtPoints.forEach(gtPoint => {
+                        console.log('[漏检检测] 邻域阈值:', neighborhoodThreshold + 'm, 时间窗口:', windowSize + 'ms');
+                        sortedGtPoints.forEach((gtPoint, idx) => {
                             let hasNeighbor = false;
-                            for (const tp of allTrackPoints) {
+                            let nearestDist = Infinity;
+                            for (const tp of uniqueTrackPoints) {
                                 const targetTs = tp.timestamp + effectiveOffset;
                                 if (Math.abs(gtPoint.timestamp - targetTs) > windowSize) continue;
                                 const dist = calculateDistance(tp.latitude, tp.longitude, gtPoint.latitude, gtPoint.longitude);
+                                if (dist < nearestDist) nearestDist = dist;
                                 if (dist <= neighborhoodThreshold) {
                                     hasNeighbor = true;
                                     break;
                                 }
                             }
-                            if (!hasNeighbor) missCount++;
+                            if (!hasNeighbor) {
+                                missCount++;
+                                // 输出前5个漏检点的详细信息
+                                if (missCount <= 5) {
+                                    const distStr = nearestDist === Infinity ? '时间窗口内无感知点' : nearestDist.toFixed(2) + 'm';
+                                    console.warn('[漏检检测] 漏检点', idx + 1, ':', distStr, ', 真值点时间:', new Date(gtPoint.timestamp).toISOString());
+                                }
+                            }
                         });
                         const missRate = sortedGtPoints.length > 0 ? missCount / sortedGtPoints.length : 0;
+                        console.log('[漏检检测] 漏检点数:', missCount, '/', sortedGtPoints.length, '漏检率:', (missRate * 100).toFixed(2) + '%');
                         
                         // 4. 速度误差（需要GS字段）
                         let speedErrors = [];
@@ -1570,8 +1749,8 @@
                             observedSampleRateHz = 1000 / medianDtMs;
                         }
                         // 检查声明的采样频率
-                        if (selectedTracksData.length > 0 && selectedTracksData[0].trajectoryInfo) {
-                            declaredSampleRateHz = selectedTracksData[0].trajectoryInfo.sampleRateHz;
+                        if (tracks.value.length > 0 && tracks.value[0].trajectoryInfo) {
+                            declaredSampleRateHz = tracks.value[0].trajectoryInfo.sampleRateHz;
                         }
                         
                         // 6. 丢包判定
@@ -1613,16 +1792,57 @@
                         
                         // 8. 轨迹平滑度
                         let smoothnessScore = null;
+                        console.log('[平滑度计算] 轨迹点数量:', allTrackPoints.length);
                         if (allTrackPoints.length >= 3) {
                             const sortedTrackPoints = [...allTrackPoints].sort((a, b) => a.timestamp - b.timestamp);
+                            
+                            // 去重：合并具有相同时间戳的点（取平均值）
+                            const deduplicatedPoints = [];
+                            let currentGroup = [sortedTrackPoints[0]];
+                            for (let i = 1; i < sortedTrackPoints.length; i++) {
+                                if (sortedTrackPoints[i].timestamp === currentGroup[0].timestamp) {
+                                    currentGroup.push(sortedTrackPoints[i]);
+                                } else {
+                                    // 合并当前组
+                                    const avgLat = currentGroup.reduce((sum, p) => sum + p.latitude, 0) / currentGroup.length;
+                                    const avgLng = currentGroup.reduce((sum, p) => sum + p.longitude, 0) / currentGroup.length;
+                                    const avgHeight = currentGroup.reduce((sum, p) => sum + (p.height || 0), 0) / currentGroup.length;
+                                    deduplicatedPoints.push({
+                                        timestamp: currentGroup[0].timestamp,
+                                        latitude: avgLat,
+                                        longitude: avgLng,
+                                        height: avgHeight
+                                    });
+                                    currentGroup = [sortedTrackPoints[i]];
+                                }
+                            }
+                            // 处理最后一组
+                            if (currentGroup.length > 0) {
+                                const avgLat = currentGroup.reduce((sum, p) => sum + p.latitude, 0) / currentGroup.length;
+                                const avgLng = currentGroup.reduce((sum, p) => sum + p.longitude, 0) / currentGroup.length;
+                                const avgHeight = currentGroup.reduce((sum, p) => sum + (p.height || 0), 0) / currentGroup.length;
+                                deduplicatedPoints.push({
+                                    timestamp: currentGroup[0].timestamp,
+                                    latitude: avgLat,
+                                    longitude: avgLng,
+                                    height: avgHeight
+                                });
+                            }
+                            
+                            console.log('[平滑度计算] 去重后点数:', deduplicatedPoints.length);
+                            
                             const accelerations = [];
-                            for (let i = 1; i < sortedTrackPoints.length - 1; i++) {
-                                const p0 = sortedTrackPoints[i-1];
-                                const p1 = sortedTrackPoints[i];
-                                const p2 = sortedTrackPoints[i+1];
+                            let skippedCount = 0;
+                            for (let i = 1; i < deduplicatedPoints.length - 1; i++) {
+                                const p0 = deduplicatedPoints[i-1];
+                                const p1 = deduplicatedPoints[i];
+                                const p2 = deduplicatedPoints[i+1];
                                 const dt1 = (p1.timestamp - p0.timestamp) / 1000;
                                 const dt2 = (p2.timestamp - p1.timestamp) / 1000;
-                                if (dt1 <= 0 || dt2 <= 0) continue;
+                                if (dt1 <= 0 || dt2 <= 0) {
+                                    skippedCount++;
+                                    continue;
+                                }
                                 
                                 // 使用实际距离计算速度（米/秒）
                                 const dist1 = calculateDistance(p0.latitude, p0.longitude, p1.latitude, p1.longitude);
@@ -1643,9 +1863,13 @@
                                 const ay = (vy2 - vy1) / ((dt1 + dt2) / 2);
                                 accelerations.push(Math.sqrt(ax * ax + ay * ay));
                             }
+                            console.log('[平滑度计算] 有效加速度计算点数:', accelerations.length, ', 跳过点数:', skippedCount);
                             if (accelerations.length > 0) {
                                 const rmsAcc = Math.sqrt(accelerations.reduce((sum, a) => sum + a * a, 0) / accelerations.length);
                                 smoothnessScore = 1 / (1 + rmsAcc);
+                                console.log('[平滑度计算] RMS加速度:', rmsAcc.toFixed(4), ', 平滑度分数:', smoothnessScore.toFixed(4));
+                            } else {
+                                console.warn('[平滑度计算] 无法计算加速度，可能是时间戳问题');
                             }
                         }
                         
@@ -1754,10 +1978,11 @@
                             else smoothnessScoreFinal = 2;
                         }
                         
-                        const warnings = detectMissingFields(selectedTracksData);
+                        const warnings = detectMissingFields(tracks.value);
                         
                         // 检查缺少的数据字段
-                        if (speedErrors.length === 0 && validMatches.length > 0) {
+                        const hasGSData = validMatches.some(m => m.trackPoint.GS !== undefined && m.gtPoint.GS !== undefined);
+                        if (!hasGSData && validMatches.length > 0) {
                             warnings.push('缺少速度数据(GS字段)，速度误差指标记0分');
                         }
                         if (declaredSampleRateHz === undefined) {
