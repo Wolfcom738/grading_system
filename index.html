@@ -146,6 +146,10 @@
             padding: 15px 20px;
             border-top: 1px solid rgba(56, 189, 248, 0.2);
             background: rgba(15, 23, 42, 0.9);
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
         }
         
         .scoring-panel h3 {
@@ -217,8 +221,9 @@
             background: rgba(30, 41, 59, 0.6);
             border-radius: 8px;
             border: 1px solid rgba(56, 189, 248, 0.1);
-            max-height: 300px;
+            flex: 1;
             overflow-y: auto;
+            min-height: 0;
         }
         
         .score-header {
@@ -349,13 +354,13 @@
             
             <div class="upload-area">
                 <label class="upload-btn">
-                    <input type="file" accept=".json" @change="handleFileUpload" multiple>
+                    <input type="file" accept=".json,.jsonl" @change="handleFileUpload" multiple>
                     📁 上传 JSON 数据文件
                 </label>
                 <br><br>
                 <label class="upload-btn" style="margin-top: 10px;">
-                    <input type="file" accept=".csv" @change="handleCSVUpload" multiple>
-                    📊 上传 CSV 真值文件
+                    <input type="file" accept=".csv,.json,.jsonl" @change="handleCSVUpload" multiple>
+                    📊 上传真值文件 (.csv/.json/.jsonl)
                 </label>
             </div>
             
@@ -493,10 +498,47 @@
                 const timeOffset = ref(0);
                 const timeToleranceMs = ref(2000);
                 const distanceToleranceM = ref(150);
-                const groundTruthNeighborhoodM = ref(150);
+                const groundTruthNeighborhoodM = ref(50);
                 const scoreResult = ref(null);
                 
                 const colorPool = ['#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1', '#14b8a6', '#d946ef', '#f43f5e', '#3b82f6'];
+                
+                const wgs84ToGcj02 = (lat, lng) => {
+                    const PI = Math.PI;
+                    const a = 6378245.0;
+                    const ee = 0.00669342162296594323;
+                    
+                    const transformLat = (x, y) => {
+                        let ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+                        ret += (20.0 * Math.sin(6.0 * x * PI) + 20.0 * Math.sin(2.0 * x * PI)) * 2.0 / 3.0;
+                        ret += (20.0 * Math.sin(y * PI) + 40.0 * Math.sin(y / 3.0 * PI)) * 2.0 / 3.0;
+                        ret += (160.0 * Math.sin(y / 12.0 * PI) + 320 * Math.sin(y * PI / 30.0)) * 2.0 / 3.0;
+                        return ret;
+                    };
+                    
+                    const transformLng = (x, y) => {
+                        let ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+                        ret += (20.0 * Math.sin(6.0 * x * PI) + 20.0 * Math.sin(2.0 * x * PI)) * 2.0 / 3.0;
+                        ret += (20.0 * Math.sin(x * PI) + 40.0 * Math.sin(x / 3.0 * PI)) * 2.0 / 3.0;
+                        ret += (150.0 * Math.sin(x / 12.0 * PI) + 300.0 * Math.sin(x / 30.0 * PI)) * 2.0 / 3.0;
+                        return ret;
+                    };
+                    
+                    if ((lng < 73.66 || lng > 135.05 || lat < 3.86 || lat > 53.55)) {
+                        return { lat, lng };
+                    }
+                    
+                    let dlat = transformLat(lng - 105.0, lat - 35.0);
+                    let dlng = transformLng(lng - 105.0, lat - 35.0);
+                    const radlat = lat / 180.0 * PI;
+                    let magic = Math.sin(radlat);
+                    magic = 1 - ee * magic * magic;
+                    const sqrtmagic = Math.sqrt(magic);
+                    dlat = (dlat * 180.0) / ((a * (1 - ee)) / (magic * sqrtmagic) * PI);
+                    dlng = (dlng * 180.0) / (a / sqrtmagic * Math.cos(radlat) * PI);
+                    
+                    return { lat: lat + dlat, lng: lng + dlng };
+                };
                 
                 // 设置 loading 状态
                 const setLoading = (loading, text = '处理中...', subtext = '请稍候') => {
@@ -566,7 +608,24 @@
                         const reader = new FileReader();
                         reader.onload = (e) => {
                             try { 
-                                processData(JSON.parse(e.target.result)); 
+                                const text = e.target.result;
+                                let data;
+                                try {
+                                    data = JSON.parse(text);
+                                } catch (jsonErr) {
+                                    console.log(`[handleFileUpload] JSON.parse 失败，尝试 JSONL 解析:`, jsonErr.message);
+                                    const lines = text.split('\n').filter(line => line.trim());
+                                    const jsonlEntries = [];
+                                    lines.forEach((line, idx) => {
+                                        try {
+                                            jsonlEntries.push(JSON.parse(line));
+                                        } catch (e) {
+                                            console.warn(`[JSONL解析] 第${idx+1}行解析失败，跳过:`, e.message);
+                                        }
+                                    });
+                                    data = jsonlEntries.map(entry => entry.payload || entry);
+                                }
+                                processData(data);
                             } catch (err) { 
                                 alert(`文件 ${file.name} 解析失败: ${err.message}`); 
                             }
@@ -659,84 +718,199 @@
                     const files = event.target.files;
                     if (files.length === 0) return;
                     
-                    setLoading(true, '解析 CSV 文件...', '正在处理真值数据，请稍候');
+                    setLoading(true, '解析真值文件...', '正在处理真值数据，请稍候');
                     
                     groundTruthTracks.value = [];
+                    
+                    const parseJSONL = (text) => {
+                        const lines = text.split('\n').filter(line => line.trim());
+                        const results = [];
+                        lines.forEach((line, idx) => {
+                            try {
+                                results.push(JSON.parse(line));
+                            } catch (e) {
+                                console.warn(`[JSONL解析] 第${idx+1}行解析失败，跳过:`, e.message);
+                            }
+                        });
+                        return results;
+                    };
                     
                     const parseFile = (file, callback) => {
                         const reader = new FileReader();
                         reader.onload = (e) => {
                             try {
-                                const csvText = e.target.result;
-                                const lines = csvText.split('\n');
-                                if (lines.length < 2) {
-                                    callback();
-                                    return;
-                                }
-                                
-                                const headers = parseCSVLine(lines[0]);
-                                const latIndex = headers.indexOf('latitude');
-                                const lonIndex = headers.indexOf('longitude');
-                                const datetimeIndex = headers.indexOf('datetime(utc)');
-                                const altIndex = headers.indexOf('altitude_above_seaLevel(feet)');
-                                const speedIndex = headers.indexOf('speed(mph)') !== -1 ? headers.indexOf('speed(mph)') : headers.indexOf('speed');
-                                
-                                if (latIndex === -1 || lonIndex === -1) {
-                                    alert('CSV 文件格式错误：缺少 latitude 或 longitude 列');
-                                    callback();
-                                    return;
-                                }
-                                
+                                const text = e.target.result;
+                                const fileName = file.name.toLowerCase();
                                 const points = [];
-                                const parseFn = parseFloat;
-                                const hasDateTime = datetimeIndex !== -1;
-                                const hasSpeed = speedIndex !== -1;
                                 
-                                for (let i = 1; i < lines.length; i++) {
-                                    const line = lines[i];
-                                    if (!line || line[0] === '#') continue;
-                                    
-                                    const values = parseCSVLine(line);
-                                    if (values.length <= lonIndex) continue;
-                                    
-                                    const lat = parseFn(values[latIndex]);
-                                    const lon = parseFn(values[lonIndex]);
-                                    
-                                    if (isNaN(lat) || isNaN(lon)) continue;
-                                    
-                                    let timestamp = 0;
-                                    if (hasDateTime && values[datetimeIndex]) {
-                                        timestamp = parseISODate(values[datetimeIndex]);
-                                    }
-                                    
-                                    let altitude = 0;
-                                    if (altIndex !== -1 && values[altIndex]) {
-                                        altitude = parseFn(values[altIndex]) * 0.3048;
-                                    }
-                                    
-                                    let GS = 0;
-                                    if (hasSpeed && values[speedIndex]) {
-                                        GS = parseFn(values[speedIndex]) * 0.44704;
-                                    }
-                                    
-                                    points.push({
-                                        latitude: lat,
-                                        longitude: lon,
-                                        timestamp: timestamp,
-                                        datetime: hasDateTime ? values[datetimeIndex] : '',
-                                        altitude: altitude,
-                                        GS: GS
+                                if (fileName.endsWith('.jsonl')) {
+                                    // JSONL 格式解析
+                                    const entries = parseJSONL(text);
+                                    entries.forEach(entry => {
+                                        if (!entry || typeof entry !== 'object') return;
+                                        
+                                        const payload = entry.payload || entry;
+                                        const summary = entry.summary || {};
+                                        
+                                        let lat = payload.lat || summary.lat;
+                                        let lon = payload.lon || summary.lon;
+                                        
+                                        if (!lat || !lon) {
+                                            lat = payload.latitude || summary.latitude;
+                                            lon = payload.longitude || summary.longitude;
+                                        }
+                                        
+                                        if (isNaN(lat) || isNaN(lon)) return;
+                                        
+                                        // 优先使用 payload.timestamp（无人机实际测量时间），其次使用 received_at_ms
+                                        let timestamp = 0;
+                                        if (payload.timestamp) {
+                                            timestamp = parseISODate(payload.timestamp);
+                                        } else {
+                                            timestamp = payload.received_at_ms || payload.receivedAtMs || entry.received_by_dashboard_ms || 0;
+                                        }
+                                        
+                                        const altitude = payload.height || payload.ellipsoid_height || payload.alt || 0;
+                                        const GS = payload.speed || payload.speed_mps || 0;
+                                        const objectID = payload.source || summary.source || 'unknown';
+                                        
+                                        points.push({
+                                            latitude: parseFloat(lat),
+                                            longitude: parseFloat(lon),
+                                            timestamp: parseInt(timestamp),
+                                            datetime: payload.timestamp || '',
+                                            altitude: parseFloat(altitude),
+                                            GS: parseFloat(GS),
+                                            objectID: objectID
+                                        });
                                     });
+                                } else if (fileName.endsWith('.json')) {
+                                    // JSON 格式解析，失败时回退到 JSONL
+                                    let entries = [];
+                                    try {
+                                        const data = JSON.parse(text);
+                                        entries = Array.isArray(data) ? data : (data.payload || data.summary || data.tracks || data.points || []);
+                                    } catch (jsonErr) {
+                                        console.log(`[handleCSVUpload] JSON.parse 失败，尝试 JSONL 解析:`, jsonErr.message);
+                                        const lines = text.split('\n').filter(line => line.trim());
+                                        lines.forEach((line, idx) => {
+                                            try {
+                                                const trimmedLine = line.replace(/,\s*$/, '');
+                                                entries.push(JSON.parse(trimmedLine));
+                                            } catch (e) {
+                                                console.warn(`[JSONL解析] 第${idx+1}行解析失败，跳过:`, e.message);
+                                            }
+                                        });
+                                    }
+                                    
+                                    entries.forEach(entry => {
+                                        if (!entry || typeof entry !== 'object') return;
+                                        
+                                        let lat = entry.lat || entry.latitude;
+                                        let lon = entry.lon || entry.longitude;
+                                        let timestamp = entry.received_at_ms || entry.receivedAtMs || entry.timestamp_ms || entry.timestamp || 0;
+                                        
+                                        if (!timestamp && typeof entry.timestamp === 'string') {
+                                            timestamp = parseISODate(entry.timestamp);
+                                        }
+                                        
+                                        if (isNaN(lat) || isNaN(lon)) return;
+                                        
+                                        const altitude = entry.height || entry.ellipsoid_height || entry.alt || entry.altitude || 0;
+                                        const GS = entry.speed || entry.speed_mps || entry.GS || 0;
+                                        const objectID = entry.source || entry.objectID || 'unknown';
+                                        
+                                        points.push({
+                                            latitude: parseFloat(lat),
+                                            longitude: parseFloat(lon),
+                                            timestamp: parseInt(timestamp),
+                                            datetime: typeof entry.timestamp === 'string' ? entry.timestamp : '',
+                                            altitude: parseFloat(altitude),
+                                            GS: parseFloat(GS),
+                                            objectID: objectID
+                                        });
+                                    });
+                                } else {
+                                    // CSV 格式解析
+                                    const lines = text.split('\n');
+                                    if (lines.length < 2) {
+                                        callback();
+                                        return;
+                                    }
+                                    
+                                    const headers = parseCSVLine(lines[0]);
+                                    const latIndex = headers.indexOf('latitude');
+                                    const lonIndex = headers.indexOf('longitude');
+                                    const datetimeIndex = headers.indexOf('datetime(utc)');
+                                    const altIndex = headers.indexOf('altitude_above_seaLevel(feet)');
+                                    const speedIndex = headers.indexOf('speed(mph)') !== -1 ? headers.indexOf('speed(mph)') : headers.indexOf('speed');
+                                    
+                                    if (latIndex === -1 || lonIndex === -1) {
+                                        alert('CSV 文件格式错误：缺少 latitude 或 longitude 列');
+                                        callback();
+                                        return;
+                                    }
+                                    
+                                    const parseFn = parseFloat;
+                                    const hasDateTime = datetimeIndex !== -1;
+                                    const hasSpeed = speedIndex !== -1;
+                                    
+                                    for (let i = 1; i < lines.length; i++) {
+                                        const line = lines[i];
+                                        if (!line || line[0] === '#') continue;
+                                        
+                                        const values = parseCSVLine(line);
+                                        if (values.length <= lonIndex) continue;
+                                        
+                                        const lat = parseFn(values[latIndex]);
+                                        const lon = parseFn(values[lonIndex]);
+                                        
+                                        if (isNaN(lat) || isNaN(lon)) continue;
+                                        
+                                        let timestamp = 0;
+                                        if (hasDateTime && values[datetimeIndex]) {
+                                            timestamp = parseISODate(values[datetimeIndex]);
+                                        }
+                                        
+                                        let altitude = 0;
+                                        if (altIndex !== -1 && values[altIndex]) {
+                                            altitude = parseFn(values[altIndex]) * 0.3048;
+                                        }
+                                        
+                                        let GS = 0;
+                                        if (hasSpeed && values[speedIndex]) {
+                                            GS = parseFn(values[speedIndex]) * 0.44704;
+                                        }
+                                        
+                                        points.push({
+                                            latitude: lat,
+                                            longitude: lon,
+                                            timestamp: timestamp,
+                                            datetime: hasDateTime ? values[datetimeIndex] : '',
+                                            altitude: altitude,
+                                            GS: GS
+                                        });
+                                    }
                                 }
                                 
                                 if (points.length > 0) {
-                                    groundTruthTracks.value.push({
-                                        trackID: `GT-${file.name}`,
-                                        objectID: file.name,
-                                        flightStage: 'GroundTruth',
-                                        points: points,
-                                        color: '#22c55e'
+                                    // 按对象ID分组
+                                    const pointsByObject = {};
+                                    points.forEach(p => {
+                                        const oid = p.objectID || 'default';
+                                        if (!pointsByObject[oid]) pointsByObject[oid] = [];
+                                        pointsByObject[oid].push(p);
                                     });
+                                    
+                                    for (const [oid, objPoints] of Object.entries(pointsByObject)) {
+                                        groundTruthTracks.value.push({
+                                            trackID: `GT-${oid}-${file.name}`,
+                                            objectID: oid,
+                                            flightStage: 'GroundTruth',
+                                            points: objPoints.sort((a, b) => a.timestamp - b.timestamp),
+                                            color: '#22c55e'
+                                        });
+                                    }
                                 }
                                 
                                 callback();
@@ -774,12 +948,52 @@
                     const uploadItems = Array.isArray(data) ? data : [data];
                     
                     try {
-                        uploadItems.forEach((uploadItem, uploadIdx) => {
-                            if (!uploadItem || typeof uploadItem !== 'object') {
-                                console.warn(`[processData] uploadItems[${uploadIdx}] 无效，跳过`);
-                                return;
-                            }
-                            if (!uploadItem.data || !Array.isArray(uploadItem.data)) return;
+                        const flatPoints = [];
+                        const hasFlatFormat = uploadItems.some(item => item && typeof item === 'object' && item.track_id && item.lat != null && item.lon != null && item.timestamp_ms != null);
+                        
+                        if (hasFlatFormat) {
+                            console.log('[processData] 检测到扁平格式数据，开始分组处理...');
+                            uploadItems.forEach((point, idx) => {
+                                if (!point || typeof point !== 'object' || !point.track_id || point.lat == null || point.lon == null) {
+                                    console.warn(`[processData] 扁平格式点[${idx}]无效，跳过`);
+                                    return;
+                                }
+                                flatPoints.push(point);
+                            });
+                            
+                            const trackMap = {};
+                            flatPoints.forEach(point => {
+                                const trackID = point.track_id;
+                                if (!trackMap[trackID]) {
+                                    trackMap[trackID] = {
+                                        trackID,
+                                        objectID: point.object_id || point.device_id || '',
+                                        flightStage: '',
+                                        trackDuration: '',
+                                        sampleTime: '',
+                                        points: [],
+                                        color: colorPool[Object.keys(trackMap).length % colorPool.length]
+                                    };
+                                    tracks.value.push(trackMap[trackID]);
+                                }
+                                trackMap[trackID].points.push({
+                                    longitude: point.lon,
+                                    latitude: point.lat,
+                                    height: point.z || 0,
+                                    timestamp: point.timestamp_ms,
+                                    GS: point.speed_mps || 0,
+                                    trackAngle: point.heading_deg || 0
+                                });
+                            });
+                            
+                            console.log(`[processData] 扁平格式处理完成，共 ${Object.keys(trackMap).length} 条轨迹，${flatPoints.length} 个点`);
+                        } else {
+                            uploadItems.forEach((uploadItem, uploadIdx) => {
+                                if (!uploadItem || typeof uploadItem !== 'object') {
+                                    console.warn(`[processData] uploadItems[${uploadIdx}] 无效，跳过`);
+                                    return;
+                                }
+                                if (!uploadItem.data || !Array.isArray(uploadItem.data)) return;
                             uploadItem.data.forEach((item, itemIdx) => {
                                 if (!item || typeof item !== 'object') {
                                     console.warn(`[processData] data[${itemIdx}] 无效，跳过`);
@@ -815,6 +1029,7 @@
                                 }
                             });
                         });
+                        }
                         
                         tracks.value.forEach(t => { if (!selectedTracks.value.includes(t.trackID)) selectedTracks.value.push(t.trackID); });
                         
@@ -892,12 +1107,13 @@
                 
                 const updateSensorMarker = (lat, lng, sensorData) => {
                     if (sensorMarker.value) map.value.removeLayer(sensorMarker.value);
+                    const gcj = wgs84ToGcj02(lat, lng);
                     const icon = L.divIcon({
                         className: 'sensor-marker',
                         html: `<div style="width:24px;height:24px;background:rgba(56,189,248,0.9);border:2px solid #fff;border-radius:50%;box-shadow:0 0 15px rgba(56,189,248,0.6);display:flex;align-items:center;justify-content:center;font-size:12px;color:white;">📡</div>`,
                         iconSize: [24, 24], iconAnchor: [12, 12]
                     });
-                    sensorMarker.value = L.marker([lat, lng], { icon }).addTo(map.value);
+                    sensorMarker.value = L.marker([gcj.lat, gcj.lng], { icon }).addTo(map.value);
                     sensorMarker.value.bindPopup(`
                         <div class="sensor-popup"><h4>📡 传感器信息</h4>
                         <p><span class="highlight">厂商ID:</span> ${sensorData.sensorManufacturerID || 'N/A'}</p>
@@ -909,7 +1125,7 @@
                         <p><span class="highlight">仰角:</span> ${sensorData.sensorPosture?.elevation || 'N/A'}°</p>
                         <p><span class="highlight">类型:</span> ${sensorData.sensorExtra?.sensorCategory || 'N/A'}</p></div>
                     `);
-                    map.value.setView([lat, lng], 14);
+                    map.value.setView([gcj.lat, gcj.lng], 14);
                 };
                 
                 const updateMap = () => {
@@ -940,15 +1156,16 @@
                     // 绘制感知轨迹
                     tracks.value.forEach(track => {
                         if (!selectedTracks.value.includes(track.trackID)) return;
-                        // 过滤无效点
                         const validPoints = track.points.filter(p => p.latitude != null && p.longitude != null && !isNaN(p.latitude) && !isNaN(p.longitude));
                         if (validPoints.length === 0) return;
-                        const latlngs = validPoints.map(p => [p.latitude, p.longitude]);
+                        const latlngs = validPoints.map(p => {
+                            const gcj = wgs84ToGcj02(p.latitude, p.longitude);
+                            return [gcj.lat, gcj.lng];
+                        });
                         const color = track.color;
                         
                         const polyline = L.polyline(latlngs, { color, weight: 3, opacity: 0.8, lineCap: 'round', lineJoin: 'round' }).addTo(map.value);
                         
-                        // 使用 CircleMarker 替代 divIcon，确保缩放时位置正确
                         const startMarker = L.circleMarker(latlngs[0], { 
                             radius: 7, 
                             fillColor: '#ef4444', 
@@ -970,7 +1187,8 @@
                         const pointMarkers = [];
                         validPoints.forEach((p, idx) => {
                             if (idx === 0 || idx === validPoints.length - 1) return;
-                            const marker = L.circleMarker([p.latitude, p.longitude], { 
+                            const gcj = wgs84ToGcj02(p.latitude, p.longitude);
+                            const marker = L.circleMarker([gcj.lat, gcj.lng], { 
                                 radius: 4, 
                                 fillColor: color, 
                                 color: '#fff', 
@@ -989,7 +1207,10 @@
                     groundTruthTracks.value.forEach(track => {
                         const validPoints = track.points.filter(p => p.latitude != null && p.longitude != null && !isNaN(p.latitude) && !isNaN(p.longitude));
                         if (validPoints.length === 0) return;
-                        const latlngs = validPoints.map(p => [p.latitude, p.longitude]);
+                        const latlngs = validPoints.map(p => {
+                            const gcj = wgs84ToGcj02(p.latitude, p.longitude);
+                            return [gcj.lat, gcj.lng];
+                        });
                         const color = track.color;
                         
                         const polyline = L.polyline(latlngs, { color, weight: 3, opacity: 0.9, lineCap: 'round', lineJoin: 'round', dashArray: '10, 10' }).addTo(map.value);
@@ -1016,7 +1237,8 @@
                         const pointMarkers = [];
                         validPoints.forEach((p, idx) => {
                             if (idx === 0 || idx === validPoints.length - 1) return;
-                            const marker = L.circleMarker([p.latitude, p.longitude], { 
+                            const gcj = wgs84ToGcj02(p.latitude, p.longitude);
+                            const marker = L.circleMarker([gcj.lat, gcj.lng], { 
                                 radius: 4, 
                                 fillColor: color, 
                                 color: '#fff', 
@@ -1033,10 +1255,16 @@
                     // 自动调整地图视野
                     const allPoints = [];
                     tracks.value.filter(t => selectedTracks.value.includes(t.trackID)).forEach(t => {
-                        t.points.filter(p => p.latitude != null && p.longitude != null).forEach(p => allPoints.push([p.latitude, p.longitude]));
+                        t.points.filter(p => p.latitude != null && p.longitude != null).forEach(p => {
+                            const gcj = wgs84ToGcj02(p.latitude, p.longitude);
+                            allPoints.push([gcj.lat, gcj.lng]);
+                        });
                     });
                     groundTruthTracks.value.forEach(t => {
-                        t.points.filter(p => p.latitude != null && p.longitude != null).forEach(p => allPoints.push([p.latitude, p.longitude]));
+                        t.points.filter(p => p.latitude != null && p.longitude != null).forEach(p => {
+                            const gcj = wgs84ToGcj02(p.latitude, p.longitude);
+                            allPoints.push([gcj.lat, gcj.lng]);
+                        });
                     });
                     
                     if (allPoints.length > 0 && map.value) {
@@ -1079,7 +1307,10 @@
                     const validPoints = track.points.filter(p => p.latitude != null && p.longitude != null && !isNaN(p.latitude) && !isNaN(p.longitude));
                     if (validPoints.length === 0) return;
                     
-                    const latlngs = validPoints.map(p => [p.latitude, p.longitude]);
+                    const latlngs = validPoints.map(p => {
+                        const gcj = wgs84ToGcj02(p.latitude, p.longitude);
+                        return [gcj.lat, gcj.lng];
+                    });
                     const color = track.color;
                     
                     const polyline = L.polyline(latlngs, { color, weight: 3, opacity: 0.8, lineCap: 'round', lineJoin: 'round' }).addTo(map.value);
@@ -1105,7 +1336,8 @@
                     const pointMarkers = [];
                     validPoints.forEach((p, idx) => {
                         if (idx === 0 || idx === validPoints.length - 1) return;
-                        const marker = L.circleMarker([p.latitude, p.longitude], { 
+                        const gcj = wgs84ToGcj02(p.latitude, p.longitude);
+                        const marker = L.circleMarker([gcj.lat, gcj.lng], { 
                             radius: 4, 
                             fillColor: color, 
                             color: '#fff', 
@@ -1146,11 +1378,17 @@
                     trackIDs.forEach(trackID => {
                         const track = tracks.value.find(t => t.trackID === trackID);
                         if (track) {
-                            track.points.forEach(p => allPoints.push([p.latitude, p.longitude]));
+                            track.points.forEach(p => {
+                                const gcj = wgs84ToGcj02(p.latitude, p.longitude);
+                                allPoints.push([gcj.lat, gcj.lng]);
+                            });
                         }
                     });
                     groundTruthTracks.value.forEach(t => {
-                        t.points.forEach(p => allPoints.push([p.latitude, p.longitude]));
+                        t.points.forEach(p => {
+                            const gcj = wgs84ToGcj02(p.latitude, p.longitude);
+                            allPoints.push([gcj.lat, gcj.lng]);
+                        });
                     });
                     
                     if (allPoints.length > 0) map.value.fitBounds(allPoints, { padding: [50, 50] });
@@ -1163,7 +1401,10 @@
                     }
                     const validPoints = track.points.filter(p => p.latitude != null && p.longitude != null && !isNaN(p.latitude) && !isNaN(p.longitude));
                     if (validPoints.length > 0) {
-                        const bounds = validPoints.map(p => [p.latitude, p.longitude]);
+                        const bounds = validPoints.map(p => {
+                            const gcj = wgs84ToGcj02(p.latitude, p.longitude);
+                            return [gcj.lat, gcj.lng];
+                        });
                         map.value.fitBounds(bounds, { padding: [80, 80], maxZoom: 16 });
                     }
                 };
