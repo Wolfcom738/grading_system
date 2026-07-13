@@ -488,6 +488,7 @@
                 const groundTruthLayers = ref({});
                 const sensorMarker = ref(null);
                 const sensorInfo = ref({});
+                const originalUploadData = ref(null);
                 
                 // Loading 状态
                 const isLoading = ref(false);
@@ -944,6 +945,7 @@
                 const processData = (data) => {
                     tracks.value = [];
                     selectedTracks.value = [];
+                    originalUploadData.value = data;
                     
                     const uploadItems = Array.isArray(data) ? data : [data];
                     
@@ -1567,15 +1569,389 @@
                             }
                         });
                         
-                        // 检查轨迹点数据（在 track.points 中）
                         if (!track.points || track.points.length === 0) {
                             warnings.push(`轨迹 ${track.trackID || '#' + trackIndex}: 缺少轨迹点数据(points)`);
                         } else {
-                            // 检查轨迹点是否有必要的字段
                             const hasLatLng = track.points.some(p => p.latitude && p.longitude);
                             if (!hasLatLng) {
                                 warnings.push(`轨迹 ${track.trackID}: 轨迹点缺少经纬度数据`);
                             }
+                        }
+                    });
+                    
+                    if (originalUploadData.value) {
+                        const schemaWarnings = validateAgainstSchema(originalUploadData.value);
+                        warnings.push(...schemaWarnings);
+                    }
+                    
+                    return warnings;
+                };
+                
+                const validateAgainstSchema = (data) => {
+                    const warnings = [];
+                    const schema = {
+                        "required": ["dataType", "version", "source", "uploadTime", "data"],
+                        "properties": {
+                            "dataType": { "type": "string", "const": "PerceivedStatusUpload" },
+                            "version": { "type": "string", "enum": ["2.1beta", "2.0beta", "1.0"] },
+                            "source": { "type": "string", "minLength": 1 },
+                            "uploadTime": { "type": "integer", "minimum": 1000000000000 }
+                        },
+                        "$defs": {
+                            "operatorInfo": {
+                                "required": ["entityID", "entityName", "entityType", "phone"]
+                            },
+                            "absolutePoint": {
+                                "required": ["longitude", "latitude", "height"]
+                            },
+                            "sensorPosture": {
+                                "oneOf": [
+                                    { "required": ["roll", "pitch", "yaw"] },
+                                    { "required": ["azimuth", "elevation", "twist"] }
+                                ]
+                            },
+                            "singleSensorExtra": {
+                                "oneOf": [
+                                    { "required": ["sensorCategory"] },
+                                    { "required": ["sensorCategory", "horizontalFOVMin", "horizontalFOVMax", "verticalFOVMin", "verticalFOVMax", "perceivedRange"] }
+                                ]
+                            },
+                            "sensorCapability": {
+                                "properties": {
+                                    "maxDetectionRangeM": {},
+                                    "heightCoverageM": {},
+                                    "speedRangeMps": { "oneOf": [{ "required": ["min", "max"] }, { "type": "null" }] },
+                                    "speedRangeKmh": { "oneOf": [{ "required": ["min", "max"] }, { "type": "null" }] },
+                                    "selfCalibrationSupported": {},
+                                    "deviceWeightKg": {},
+                                    "supportsStaticTarget": {},
+                                    "supportsQuasiStaticTarget": {},
+                                    "supportsDynamicTarget": {}
+                                }
+                            },
+                            "groundPosition": {
+                                "required": ["positionBase", "longitude", "latitude", "height"]
+                            },
+                            "groundVelocity": {
+                                "required": ["velocityBase", "GS", "VS", "trackAngle"]
+                            },
+                            "trajectoryPoint": {
+                                "required": ["sampleTime", "longitude", "latitude", "height"]
+                            },
+                            "trajectoryPointPrecision": {
+                                "required": ["deltaLongitude", "deltaLatitude", "deltaHeight"]
+                            },
+                            "objectBoundingBox3D": {
+                                "required": ["length", "width", "height"]
+                            },
+                            "uavDetails": {},
+                            "evtolDetails": {},
+                            "generalAviationDetails": {},
+                            "civilAviationDetails": {},
+                            "airborneMovingObstacleDetails": {},
+                            "sensedDetails": {},
+                            "objectRecognition": {
+                                "properties": {
+                                    "targetType": {},
+                                    "targetCategory": {},
+                                    "isAircraft": {},
+                                    "sizeRadiusM": {},
+                                    "boundingBox3D": {},
+                                    "sensedDetails": {},
+                                    "recognitionConfidence": {}
+                                }
+                            },
+                            "trajectoryInfo": {
+                                "properties": {
+                                    "sampleRateHz": {}
+                                }
+                            },
+                            "associationInfo": {
+                                "properties": {
+                                    "sourceTrackID": {},
+                                    "crossSensorAssociationID": {},
+                                    "associationConfidence": {}
+                                }
+                            },
+                            "fusionInfo": {
+                                "properties": {
+                                    "isFused": {},
+                                    "fusionType": {},
+                                    "memberSensorCount": {},
+                                    "memberSensorSNList": {}
+                                }
+                            },
+                            "singleObjectStatusExtra": {
+                                "properties": {
+                                    "detectionConfidence": {},
+                                    "associationInfo": {},
+                                    "objectRecognition": {},
+                                    "trajectoryInfo": {},
+                                    "trajectoryPoints": {}
+                                }
+                            },
+                            "networkObjectStatusExtra": {
+                                "required": ["perSensorPerceivedStatus"],
+                                "properties": {
+                                    "fusionInfo": {},
+                                    "detectionConfidence": {},
+                                    "associationInfo": {},
+                                    "objectRecognition": {},
+                                    "trajectoryInfo": {},
+                                    "trajectoryPoints": {},
+                                    "perSensorPerceivedStatus": {}
+                                }
+                            },
+                            "singleSensorPerceivedStatus": {
+                                "required": ["trackID", "objectID", "sampleTime", "trackDuration", "flightStage", "objectPosition", "objectVelocity"]
+                            },
+                            "networkPerceivedStatus": {
+                                "required": ["trackID", "objectID", "sampleTime", "trackDuration", "flightStage", "objectPosition", "objectVelocity", "objectStatusExtra"]
+                            },
+                            "sensorMember": {
+                                "required": ["sensorManufacturerID", "sensorSN", "sensorOperatorInfo", "sensorLocation", "sensorPosture", "sensorExtra"]
+                            },
+                            "singleSensorReportItem": {
+                                "required": ["sensor", "CRS", "heightDesc", "perceivedStatus"]
+                            },
+                            "sensorNetwork": {
+                                "required": ["type", "sensorManufacturerID", "sensorSN", "sensorOperatorInfo", "sensorLocation", "sensorPosture", "sensorExtra"]
+                            },
+                            "sensorNetworkReportItem": {
+                                "required": ["sensor", "CRS", "heightDesc", "perceivedStatus"]
+                            },
+                            "heightDesc": {
+                                "oneOf": [
+                                    { "required": ["heightType"] },
+                                    { "required": ["heightType", "baseModel"] },
+                                    { "required": ["heightType", "baseDEM"] },
+                                    { "required": ["heightType", "QNERefInfo"] }
+                                ]
+                            }
+                        }
+                    };
+                    
+                    const uploadItems = Array.isArray(data) ? data : [data];
+                    
+                    uploadItems.forEach((item, itemIdx) => {
+                        if (!item || typeof item !== 'object') return;
+                        
+                        const payload = item.payload || item;
+                        
+                        if (!payload.dataType) {
+                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据: 缺少必需字段 "dataType"`);
+                        } else if (payload.dataType !== 'PerceivedStatusUpload') {
+                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据: dataType值不正确，期望 "PerceivedStatusUpload"，实际 "${payload.dataType}"`);
+                        }
+                        
+                        if (!payload.version) {
+                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据: 缺少必需字段 "version"`);
+                        } else if (!['2.1beta', '2.0beta', '1.0'].includes(payload.version)) {
+                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据: version值不正确，期望 "2.1beta"、"2.0beta" 或 "1.0"，实际 "${payload.version}"`);
+                        }
+                        
+                        if (!payload.source) {
+                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据: 缺少必需字段 "source"`);
+                        }
+                        
+                        if (!payload.uploadTime) {
+                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据: 缺少必需字段 "uploadTime"`);
+                        }
+                        
+                        if (!payload.data || !Array.isArray(payload.data) || payload.data.length === 0) {
+                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据: 缺少必需字段 "data" 或 data数组为空`);
+                        } else {
+                            payload.data.forEach((dataItem, dataIdx) => {
+                                if (!dataItem.sensor) {
+                                    warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}]: 缺少必需字段 "sensor"`);
+                                } else {
+                                    const sensor = dataItem.sensor;
+                                    if (!sensor.sensorManufacturerID) {
+                                        warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].sensor: 缺少必需字段 "sensorManufacturerID"`);
+                                    }
+                                    if (!sensor.sensorSN) {
+                                        warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].sensor: 缺少必需字段 "sensorSN"`);
+                                    }
+                                    if (!sensor.sensorOperatorInfo) {
+                                        warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].sensor: 缺少必需字段 "sensorOperatorInfo"`);
+                                    } else {
+                                        const operator = sensor.sensorOperatorInfo;
+                                        if (!operator.entityID) {
+                                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].sensor.sensorOperatorInfo: 缺少必需字段 "entityID"`);
+                                        }
+                                        if (!operator.entityName) {
+                                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].sensor.sensorOperatorInfo: 缺少必需字段 "entityName"`);
+                                        }
+                                        if (!operator.entityType) {
+                                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].sensor.sensorOperatorInfo: 缺少必需字段 "entityType"`);
+                                        }
+                                        if (!operator.phone) {
+                                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].sensor.sensorOperatorInfo: 缺少必需字段 "phone"`);
+                                        }
+                                    }
+                                    if (!sensor.sensorLocation) {
+                                        warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].sensor: 缺少必需字段 "sensorLocation"`);
+                                    } else {
+                                        const location = sensor.sensorLocation;
+                                        if (location.longitude == null) {
+                                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].sensor.sensorLocation: 缺少必需字段 "longitude"`);
+                                        }
+                                        if (location.latitude == null) {
+                                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].sensor.sensorLocation: 缺少必需字段 "latitude"`);
+                                        }
+                                        if (location.height == null) {
+                                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].sensor.sensorLocation: 缺少必需字段 "height"`);
+                                        }
+                                    }
+                                    if (!sensor.sensorPosture) {
+                                        warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].sensor: 缺少必需字段 "sensorPosture"`);
+                                    }
+                                    if (!sensor.sensorExtra) {
+                                        warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].sensor: 缺少必需字段 "sensorExtra"`);
+                                    } else {
+                                        const extra = sensor.sensorExtra;
+                                        if (!extra.sensorCategory) {
+                                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].sensor.sensorExtra: 缺少必需字段 "sensorCategory"`);
+                                        } else {
+                                            const validCategories = ['Radar', 'mmWaveRadar', '4DmmWaveRadar', '5G-A', 'RTLS', 'LiDAR', 'SmartCam', 'EO/IR', 'Other'];
+                                            if (!validCategories.includes(extra.sensorCategory)) {
+                                                warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].sensor.sensorExtra.sensorCategory: 值不正确，期望 "${validCategories.join('"、"')}"，实际 "${extra.sensorCategory}"`);
+                                            }
+                                        }
+                                    }
+                                    if (!sensor.sensorCapability) {
+                                        warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].sensor: 缺少字段 "sensorCapability"`);
+                                    } else {
+                                        const capability = sensor.sensorCapability;
+                                        if (capability.speedRangeMps && capability.speedRangeMps !== null) {
+                                            if (capability.speedRangeMps.min == null) {
+                                                warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].sensor.sensorCapability.speedRangeMps: 缺少字段 "min"`);
+                                            }
+                                            if (capability.speedRangeMps.max == null) {
+                                                warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].sensor.sensorCapability.speedRangeMps: 缺少字段 "max"`);
+                                            }
+                                        }
+                                        if (capability.speedRangeKmh && capability.speedRangeKmh !== null) {
+                                            if (capability.speedRangeKmh.min == null) {
+                                                warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].sensor.sensorCapability.speedRangeKmh: 缺少字段 "min"`);
+                                            }
+                                            if (capability.speedRangeKmh.max == null) {
+                                                warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].sensor.sensorCapability.speedRangeKmh: 缺少字段 "max"`);
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                if (!dataItem.CRS) {
+                                    warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}]: 缺少字段 "CRS"（默认使用WGS84）`);
+                                }
+                                
+                                if (!dataItem.heightDesc) {
+                                    warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}]: 缺少字段 "heightDesc"`);
+                                } else {
+                                    if (!dataItem.heightDesc.heightType) {
+                                        warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].heightDesc: 缺少必需字段 "heightType"`);
+                                    }
+                                }
+                                
+                                if (!dataItem.perceivedStatus || !Array.isArray(dataItem.perceivedStatus) || dataItem.perceivedStatus.length === 0) {
+                                    warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}]: 缺少必需字段 "perceivedStatus" 或数组为空`);
+                                } else {
+                                    dataItem.perceivedStatus.forEach((status, statusIdx) => {
+                                        if (!status.trackID) {
+                                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}]: 缺少必需字段 "trackID"`);
+                                        }
+                                        if (!status.objectID) {
+                                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}]: 缺少必需字段 "objectID"`);
+                                        }
+                                        if (!status.sampleTime) {
+                                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}]: 缺少必需字段 "sampleTime"`);
+                                        }
+                                        if (!status.trackDuration) {
+                                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}]: 缺少字段 "trackDuration"`);
+                                        }
+                                        if (!status.flightStage) {
+                                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}]: 缺少字段 "flightStage"`);
+                                        }
+                                        
+                                        if (!status.objectPosition || !Array.isArray(status.objectPosition) || status.objectPosition.length === 0) {
+                                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}]: 缺少必需字段 "objectPosition"`);
+                                        } else {
+                                            const hasGroundPosition = status.objectPosition.some(p => p.positionBase === 'Ground');
+                                            if (!hasGroundPosition) {
+                                                warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}].objectPosition: 缺少 positionBase 为 "Ground" 的位置信息`);
+                                            }
+                                            status.objectPosition.forEach((pos, posIdx) => {
+                                                if (pos.positionBase === 'Ground') {
+                                                    if (pos.longitude == null) {
+                                                        warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}].objectPosition[${posIdx}]: 缺少必需字段 "longitude"`);
+                                                    }
+                                                    if (pos.latitude == null) {
+                                                        warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}].objectPosition[${posIdx}]: 缺少必需字段 "latitude"`);
+                                                    }
+                                                    if (pos.height == null) {
+                                                        warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}].objectPosition[${posIdx}]: 缺少必需字段 "height"`);
+                                                    }
+                                                }
+                                            });
+                                        }
+                                        
+                                        if (!status.objectVelocity || !Array.isArray(status.objectVelocity) || status.objectVelocity.length === 0) {
+                                            warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}]: 缺少必需字段 "objectVelocity"`);
+                                        } else {
+                                            const hasGroundVelocity = status.objectVelocity.some(v => v.velocityBase === 'Ground');
+                                            if (!hasGroundVelocity) {
+                                                warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}].objectVelocity: 缺少 velocityBase 为 "Ground" 的速度信息`);
+                                            }
+                                            status.objectVelocity.forEach((vel, velIdx) => {
+                                                if (vel.velocityBase === 'Ground') {
+                                                    if (vel.GS == null) {
+                                                        warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}].objectVelocity[${velIdx}]: 缺少必需字段 "GS"`);
+                                                    }
+                                                    if (vel.VS == null) {
+                                                        warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}].objectVelocity[${velIdx}]: 缺少必需字段 "VS"`);
+                                                    }
+                                                    if (vel.trackAngle == null) {
+                                                        warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}].objectVelocity[${velIdx}]: 缺少必需字段 "trackAngle"`);
+                                                    }
+                                                }
+                                            });
+                                        }
+                                        
+                                        if (status.objectStatusExtra) {
+                                            const extra = status.objectStatusExtra;
+                                            
+                                            if (extra.trajectoryInfo && !extra.trajectoryInfo.sampleRateHz) {
+                                                warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}].objectStatusExtra.trajectoryInfo: 缺少字段 "sampleRateHz"`);
+                                            }
+                                            
+                                            if (extra.trajectoryPoints && Array.isArray(extra.trajectoryPoints)) {
+                                                extra.trajectoryPoints.forEach((point, pointIdx) => {
+                                                    if (point.sampleTime == null) {
+                                                        warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}].objectStatusExtra.trajectoryPoints[${pointIdx}]: 缺少必需字段 "sampleTime"`);
+                                                    }
+                                                    if (point.longitude == null) {
+                                                        warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}].objectStatusExtra.trajectoryPoints[${pointIdx}]: 缺少必需字段 "longitude"`);
+                                                    }
+                                                    if (point.latitude == null) {
+                                                        warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}].objectStatusExtra.trajectoryPoints[${pointIdx}]: 缺少必需字段 "latitude"`);
+                                                    }
+                                                    if (point.height == null) {
+                                                        warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}].objectStatusExtra.trajectoryPoints[${pointIdx}]: 缺少必需字段 "height"`);
+                                                    }
+                                                });
+                                            }
+                                            
+                                            if (extra.objectRecognition && extra.objectRecognition.targetCategory) {
+                                                const validCategories = ['uav', 'evtol', 'general_aviation', 'civil_aviation', 'airborne_moving_obstacle', 'bird', 'balloon', 'paraglider', 'kite', 'other'];
+                                                if (!validCategories.includes(extra.objectRecognition.targetCategory) && extra.objectRecognition.targetCategory !== null) {
+                                                    warnings.push(`[Schema校验] 第${itemIdx+1}条数据 -> data[${dataIdx}].perceivedStatus[${statusIdx}].objectStatusExtra.objectRecognition.targetCategory: 值不正确，期望 "${validCategories.join('"、"')}"，实际 "${extra.objectRecognition.targetCategory}"`);
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+                            });
                         }
                     });
                     
@@ -1594,7 +1970,7 @@
                     
                     setLoading(true, '评分计算中...', '正在对齐数据并计算指标');
                     
-                    setTimeout(() => {
+                    setTimeout(async () => {
                         // 只处理用户选中的轨迹
                         const selectedTrackIDs = selectedTracks.value;
                         console.log('[评分调试] 选中的轨迹:', selectedTrackIDs);
